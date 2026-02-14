@@ -2344,6 +2344,7 @@
     .badge.good { border-color: rgba(22,163,74,0.35); background: rgba(22,163,74,0.10); }
     .badge.warn { border-color: rgba(217,119,6,0.40); background: rgba(217,119,6,0.10); }
     .badge.bad { border-color: rgba(220,38,38,0.42); background: rgba(220,38,38,0.10); }
+    .badge.info { border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.10); }
     .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
     .tab {
       padding: 6px 10px;
@@ -2463,7 +2464,7 @@
       border-bottom: 1px solid var(--border2);
       margin-bottom: 10px;
     }
-    .modalTitle { font-weight: 900; font-family: var(--serif); }
+    .modalTitle { font-weight: 950; font-family: var(--serif); font-size: 15px; letter-spacing: 0.2px; }
     .cpList { display: grid; gap: 10px; }
     .cpItem {
       border: 1px solid var(--border2);
@@ -2474,7 +2475,12 @@
     :root[data-theme="light"] .cpItem { background: rgba(255,255,255,0.70); }
     .cpMeta { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
     .cpMetaL { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .cpK { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .cpK { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .cpItem .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+    .cpItem button { padding: 7px 10px; border-radius: 10px; font-weight: 800; }
+    .cpItem button.primary { border-color: rgba(217,119,87,0.45); background: rgba(217,119,87,0.14); }
+    :root:not([data-theme="light"]) .cpItem button.primary { background: rgba(217,119,87,0.18); }
+    .cpItem button:hover { border-color: rgba(217,119,87,0.38); }
     .cpBtns { display:flex; gap:8px; flex-wrap:wrap; }
     .cpBtns button { padding: 6px 8px; }
     @media (max-width: 1100px) {
@@ -2488,7 +2494,11 @@
 	  <div class="topbar">
 	    <button id="btnTheme" class="themeIcon" title="切换主题" aria-label="切换主题"></button>
 	    <div class="topbar-row">
-	      <div class="title">Model Redirect Toolkit <span class="muted" id="dashVer"></span> <span class="muted" id="planInfo" style="margin-left:10px;"></span></div>
+	      <div class="title">
+	        Model Redirect Toolkit
+	        <span class="badge" id="dashVer"></span>
+	        <span class="badge" id="planInfo"></span>
+	      </div>
 	      <button id="btnRefresh">刷新快照</button>
 	      <button class="primary" id="btnDryRun">运行 dry-run</button>
 	      <button class="danger" id="btnApply">写入数据库</button>
@@ -2572,7 +2582,7 @@
     <div class="col">
       <div class="card">
         <div class="card-h">
-          <strong>详情 / 操作</strong>
+          <strong>操作详情</strong>
           <span class="muted" id="rightMeta"></span>
         </div>
         <div class="card-b">
@@ -2827,7 +2837,17 @@
         const { ch, rec, db, plan, diff } = currentMaps();
         el('midTitle').textContent = ch ? ('#' + ch.id + ' ' + (ch.name||'')) : '映射预览';
         el('midMeta').textContent = ch ? ('models ' + (ch.models?ch.models.length:0) + (ch.group?(' | ' + ch.group):'')) : '';
-        el('rightMeta').textContent = ch ? (String(ch.group||'') + (Number(ch.status)===1?' | enabled':' | disabled')) : '';
+        // 右侧 meta：把 “翻译 | enabled” 这种调试串换成更直观的标签
+        if (ch) {
+          const enabled = Number(ch.status) === 1;
+          const gs = String(ch.group || '').split(',').map((s) => s.trim()).filter(Boolean);
+          const chips = [];
+          for (const g of gs.slice(0, 12)) chips.push('<span class="badge">' + escapeHtml(g) + '</span>');
+          chips.push('<span class="badge ' + (enabled ? 'good' : 'warn') + '">' + (enabled ? 'enabled' : 'disabled') + '</span>');
+          el('rightMeta').innerHTML = chips.join(' ');
+        } else {
+          el('rightMeta').textContent = '';
+        }
 
         if (rec && rec.ok) {
           const b = diffBreakdown(rec.diff);
@@ -2871,7 +2891,14 @@
         const snapTs = st.snapshot && st.snapshot.ts ? Number(st.snapshot.ts) : null;
         const planSnapTs = st.plan && st.plan.snapshot_ts ? Number(st.plan.snapshot_ts) : null;
         const stale = (pv !== SCRIPT_VERSION) || (snapTs && planSnapTs && snapTs !== planSnapTs);
-        el('planInfo').textContent = st.plan ? ('plan ' + pv + (stale ? ' (建议重跑)' : '')) : '';
+        if (!st.plan) {
+          el('planInfo').textContent = '';
+        } else {
+          // badge 里尽量短：展示 plan 版本与“建议重跑”提示
+          el('planInfo').textContent = 'plan ' + pv + (stale ? ' · 建议重跑' : '');
+          // 让“建议重跑”更醒目一点（不刷屏）
+          el('planInfo').classList.toggle('warn', !!stale);
+        }
 
         const head = el('tblHead');
         const body = el('tblBody');
