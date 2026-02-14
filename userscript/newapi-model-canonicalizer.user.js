@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         New-API Model Canonicalizer (Redirect Toolkit)
 // @namespace    https://github.com/Dawn6666666/newapi-model-canonicalizer
-// @version      0.6.14
+// @version      0.6.15
 // @description  Canonicalize model names and rebuild New-API channel model_mapping in-browser (dry-run -> apply), preventing alias cycles.
 // @author       Dawn
 // @homepageURL  https://github.com/Dawn6666666/newapi-model-canonicalizer
@@ -18,7 +18,7 @@
 
   // For debugging: if you still see SyntaxError, you're running an older cached userscript.
   // eslint-disable-next-line no-console
-  const SCRIPT_VERSION = '0.6.14';
+  const SCRIPT_VERSION = '0.6.15';
   console.log('[na-mr] userscript loaded, version=' + SCRIPT_VERSION);
 
   function uniqChannelsById(channels) {
@@ -292,18 +292,82 @@
     return h;
   }
 
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
+  }
+
+  // New-API 管理端可能对短时间内大量请求做限流（429）。
+  // 这里做两个动作：
+  // 1) 轻量串行队列 + 最小间隔：避免 burst
+  // 2) 429/5xx 重试：尊重 Retry-After；否则指数退避 + 抖动
+  let _fetchQueue = Promise.resolve();
+  let _lastFetchAt = 0;
+  const FETCH_MIN_GAP_MS = 140;
+  const FETCH_MAX_RETRY = 6;
+  const FETCH_BACKOFF_BASE_MS = 550;
+
   async function fetchJSON(url, opts = {}) {
-    const res = await fetch(url, {
-      credentials: 'include',
-      ...opts,
-      headers: { ...(opts.headers || {}), ...newApiHeaders() },
+    // 串行化请求，避免触发限流
+    _fetchQueue = _fetchQueue.then(async () => {
+      const gap = Date.now() - _lastFetchAt;
+      if (gap < FETCH_MIN_GAP_MS) await sleep(FETCH_MIN_GAP_MS - gap);
+      _lastFetchAt = Date.now();
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    const data = await res.json();
-    if (data && data.success === false) {
-      throw new Error(data.message || '请求失败');
+    await _fetchQueue;
+
+    let attempt = 0;
+    let lastErr = null;
+    while (attempt < FETCH_MAX_RETRY) {
+      attempt++;
+      try {
+        const res = await fetch(url, {
+          credentials: 'include',
+          ...opts,
+          headers: { ...(opts.headers || {}), ...newApiHeaders() },
+        });
+
+        if (!res.ok) {
+          // 429/5xx：做退避重试（PUT 写入是幂等覆盖，允许重试）
+          const status = Number(res.status) || 0;
+          const canRetry = status === 429 || status >= 500;
+          if (!canRetry) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+          // Retry-After: seconds or date
+          const ra = res.headers && res.headers.get ? res.headers.get('Retry-After') : null;
+          let waitMs = 0;
+          if (ra) {
+            const sec = Number(ra);
+            if (!Number.isNaN(sec) && sec > 0) waitMs = sec * 1000;
+            else {
+              const t = Date.parse(ra);
+              if (!Number.isNaN(t)) waitMs = Math.max(0, t - Date.now());
+            }
+          }
+          if (!waitMs) {
+            const backoff = FETCH_BACKOFF_BASE_MS * Math.pow(2, Math.min(5, attempt - 1));
+            const jitter = Math.floor(Math.random() * 180);
+            waitMs = backoff + jitter;
+          }
+          lastErr = new Error(`HTTP ${res.status} ${res.statusText}`);
+          await sleep(waitMs);
+          continue;
+        }
+
+        const data = await res.json();
+        if (data && data.success === false) {
+          // 业务层失败一般不建议盲目重试（可能是参数/权限问题）
+          throw new Error(data.message || '请求失败');
+        }
+        return data;
+      } catch (e) {
+        lastErr = e;
+        // 网络抖动也尝试重试
+        const backoff = FETCH_BACKOFF_BASE_MS * Math.pow(2, Math.min(5, attempt - 1));
+        const jitter = Math.floor(Math.random() * 180);
+        await sleep(backoff + jitter);
+      }
     }
-    return data;
+    throw lastErr || new Error('请求失败');
   }
 
   function openDB() {
@@ -441,29 +505,27 @@
       // 进度：备份阶段
       state.progress = { pct: Math.min(99, Math.floor(((i + 1) * 100) / total)), text: `备份 ${i + 1}/${total} | channel ${cid}` };
       render();
+      // 备份优先使用“快照里的 DB 值”，避免写库前再对每个渠道做 GET（很容易触发 429）。
+      // 如果快照里没有该渠道（极少见），才降级走单渠道详情接口。
       let beforeMap = {};
       let chName = '';
       let chGroup = '';
       let chStatus = null;
       let modelsCount = 0;
-      try {
+      const snapCh = (state.snapshot && state.snapshot.channels) ? state.snapshot.channels.find((x) => String(x.id) === cid) : null;
+      if (snapCh) {
+        chName = snapCh.name || '';
+        chGroup = snapCh.group || '';
+        chStatus = snapCh.status;
+        modelsCount = Array.isArray(snapCh.models) ? snapCh.models.length : 0;
+        beforeMap = snapCh.model_mapping || {};
+      } else {
         const d = await fetchChannelDetail(cid);
         chName = d.name || '';
         chGroup = d.group || '';
         chStatus = d.status;
-        const mm = safeParseJSON(d.model_mapping) || {};
-        beforeMap = mm;
+        beforeMap = safeParseJSON(d.model_mapping) || {};
         modelsCount = toModelList(d.models).length;
-      } catch (e) {
-        // fallback：使用快照里的值（可能不是最新，但总比没有强）
-        const ch = (state.snapshot && state.snapshot.channels) ? state.snapshot.channels.find((x) => String(x.id) === cid) : null;
-        if (ch) {
-          chName = ch.name || '';
-          chGroup = ch.group || '';
-          chStatus = ch.status;
-          modelsCount = Array.isArray(ch.models) ? ch.models.length : 0;
-          beforeMap = ch.model_mapping || {};
-        }
       }
       const afterMap = item.after || {};
       const s = summarizeMappingDiff(beforeMap, afterMap);
@@ -2141,6 +2203,18 @@
 	      background: rgba(255,255,255,0.28);
 	    }
     :root:not([data-theme="light"]) .toggle.sm { background: rgba(36,36,35,0.45); }
+	    .toggle.prom {
+	      padding: 5px 10px;
+	      font-weight: 800;
+	      letter-spacing: 0.1px;
+	    }
+	    .toggle.prom input { accent-color: var(--brand); }
+	    /* Edge/Chrome 已支持 :has，用来做“开关高亮” */
+	    label.toggle.prom:has(input:checked) {
+	      border-color: rgba(217,119,87,0.45);
+	      background: rgba(217,119,87,0.14);
+	      color: var(--text);
+	    }
 	    .leftToolRow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:space-between; }
 	    .leftToolRow .grow { flex: 1 1 260px; min-width: 220px; }
 	    .leftToolRow .right { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-left:auto; }
@@ -2418,13 +2492,16 @@
 	      <button id="btnRefresh">刷新快照</button>
 	      <button class="primary" id="btnDryRun">运行 dry-run</button>
 	      <button class="danger" id="btnApply">写入数据库</button>
+	      <label class="toggle prom" title="锁批次：额外生成带日期/批次的 key（例如 deepseek-r1-0528）。用于精确指定批次；开启后 key 会更多。">
+	        <input id="pinnedKeys" type="checkbox" checked />
+	        锁批次
+	      </label>
 	      <div class="bar" title="进度"><div id="barFill"></div></div>
 	      <div id="status" class="muted"></div>
 	    </div>
 	    <div class="topbar-row" style="margin-top:8px;">
 	      <div class="tabs" id="familyTabs"></div>
 	      <div class="topbar-spacer"></div>
-	      <label class="toggle sm"><input id="pinnedKeys" type="checkbox" checked /> pinned key</label>
 	    </div>
 	  </div>
 
@@ -3282,6 +3359,33 @@
         opacity: 0.45;
         cursor: not-allowed;
       }
+      #${TOOL_ID}-opts{
+        display:flex;
+        gap:8px;
+        flex-wrap:wrap;
+        align-items:center;
+        margin: 8px 0 0 0;
+      }
+      #${TOOL_ID}-opts .opt{
+        display:inline-flex;
+        gap:8px;
+        align-items:center;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border2);
+        background: rgba(255,255,255,0.60);
+        font-weight: 700;
+        user-select:none;
+      }
+      #${TOOL_ID}-panel[data-theme="dark"] #${TOOL_ID}-opts .opt{
+        background: rgba(36,36,35,0.65);
+      }
+      #${TOOL_ID}-opts .opt input{ accent-color: var(--accent); transform: translateY(1px); }
+      #${TOOL_ID}-opts .opt:hover{ border-color: rgba(217,119,87,0.35); background: rgba(217,119,87,0.10); }
+      #${TOOL_ID}-opts label.opt:has(input:checked){
+        border-color: rgba(217,119,87,0.45);
+        background: rgba(217,119,87,0.12);
+      }
       #${TOOL_ID}-muted { color: var(--muted); }
       #${TOOL_ID}-bar {
         height: 10px;
@@ -3362,10 +3466,10 @@
         <button id="${TOOL_ID}-run">运行 dry-run</button>
         <button id="${TOOL_ID}-dash">打开仪表盘</button>
       </div>
-      <div style="margin-top:8px;" class="muted">
-        <label style="display:flex; gap:8px; align-items:center;">
+      <div id="${TOOL_ID}-opts">
+        <label class="opt" title="锁批次：额外生成带日期/批次的 key（例如 deepseek-r1-0528）。用于精确指定批次；开启后 key 会更多。">
           <input id="${TOOL_ID}-pinned" type="checkbox" />
-          输出 pinned key（带日期/build，例如 deepseek-r1-0528）
+          锁批次
         </label>
       </div>
       <div id="${TOOL_ID}-bar"><div></div></div>

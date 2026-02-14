@@ -436,6 +436,10 @@ pinned key 的语义：
 - 写入 API：`PUT /api/channel/`，payload 为：
   - `{ id: <channel_id>, model_mapping: "<json-string>" }`
 - 写入完成后会清掉本地 `snapshot` 缓存，提示下次刷新快照
+- **限流（429）处理**
+  - New-API 管理端可能对短时间内大量请求限流。
+  - 脚本会自动做：请求串行化、最小间隔、以及 429/5xx 的指数退避重试（尊重 `Retry-After`）。
+  - 如果你频繁遇到 429：建议先 `刷新快照`，然后再写库；或分批写入（先少量渠道验证，再全量）。
 
 ---
 
@@ -452,6 +456,9 @@ pinned key 的语义：
   - `after`：本次计划写入的 `model_mapping`
   - `diff`：added/removed/changed（用于快速审阅）
   - 以及脚本版本、快照时间、plan 时间、关键开关（families/pinnedKeys/theme）
+- **关于 `before` 的来源（重要）**
+  - 为避免“写库前对每个渠道再 GET 一次详情”导致 429，脚本默认使用**快照中的 `model_mapping`** 作为 `before`。
+  - 因此：如果你担心快照不够新，请在写库前先点一次 `刷新快照`，再跑 dry-run 并写库。
 
 存档保存位置：
 
