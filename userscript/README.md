@@ -32,6 +32,36 @@
    - `snapshot`：全量渠道快照（`channels[]`）
    - `plan`：dry-run 的结果（每渠道 before/after/diff/reasons/warnings）
 4. 本脚本不会上传你的 Token/渠道数据到第三方；所有计算在浏览器本地完成。
+5. 权限要求：
+   - 仅“预览 / dry-run”：能访问 `GET /api/channel/` 即可（通常是已登录后台可见渠道列表的权限）。
+   - “写入数据库”：需要你当前登录用户对渠道有 `PUT /api/channel/` 的更新权限，否则会写入失败。
+
+---
+
+## 接口与字段（New-API）
+
+本脚本当前依赖的接口（以相对路径表示）：
+
+1. 拉取渠道列表（分页）
+   - `GET /api/channel/?p=<page>&page_size=<N>&id_sort=true&tag_mode=false&status=-1`
+   - 关键字段使用：
+     - `id` / `name` / `group` / `status`
+     - `models`：逗号分隔字符串或数组（脚本统一转成 `models[]`）
+     - `model_mapping`：JSON 字符串（脚本解析为对象；非法 JSON 当作 `{}`）
+2. 写回渠道映射
+   - `PUT /api/channel/`
+   - payload：
+     - `{ id: <number>, model_mapping: "<json-string>" }`
+
+鉴权与请求头：
+
+- `credentials: "include"`（使用当前浏览器登录态 Cookie）
+- `New-Api-User: <user.id>`（来自 `localStorage.user`）
+- `Authorization: Bearer <user.token>`（如果 `localStorage.user.token` 存在）
+
+兼容性提醒：
+
+- 如果 New-API 未来调整了 `localStorage.user` 的结构或 `/api/channel/` 参数/字段名，需要同步更新脚本里的 `mustGetUser()` / `newApiHeaders()` / `loadSnapshot()`。
 
 ---
 
@@ -73,6 +103,14 @@
 
 - `plan` 会记录 `script_version` 与 `snapshot_ts`。
 - 当脚本版本变化或快照变化时，仪表盘会提示“建议重跑”，避免你拿旧 plan 写入新快照导致不一致。
+
+写入前检查清单（建议每次 apply 前扫一遍）：
+
+- Diff 视图里没有明显“误伤”的专项模型（tts/embed/rerank/robotics/computer-use 等）。
+- `仅异常`（anom）为空，或你能解释清楚异常来源（value 不在 models 会写回失败或产生不可用映射）。
+- `pinned key` 开关符合你的预期：
+  - 需要“锁批次”时开启（会生成 `*-2025xxxx` / `*-0414` / `*-2507` 等 key）
+  - 只想要基础基准模型时关闭
 
 ---
 
@@ -141,6 +179,25 @@ Diff/Plan/DB 视图里，脚本会校验当前展示的 value 是否真实存在
 
 - 如果某条 value 不在 `models` 中，会标记为异常（行底色偏红）。
 - “仅异常”开关会只保留这些异常行，方便你定位“写回了不存在模型名”的风险。
+
+---
+
+## 本地缓存（IndexedDB）与清理
+
+脚本使用 IndexedDB（默认库名 `na_mr_toolkit`，store `kv`）做三类缓存：
+
+- `settings`：`{ pinnedKeys, theme }`
+- `snapshot`：全量渠道快照（渠道数多时体积较大）
+- `plan`：dry-run 结果（可能非常大，取决于渠道数量与 diff 规模）
+
+清理方式（两种选一）：
+
+1. 在浏览器开发者工具中：
+   - Application / 存储（Storage） -> IndexedDB -> `na_mr_toolkit` -> 删除
+2. 直接点击「刷新快照」强制拉取，并重新 dry-run：
+   - 会覆盖旧缓存；写入成功后脚本也会把 `snapshot` 置空，提示你下次刷新。
+
+提示：如果你发现“plan 还是旧的 / 主题不对 / 显示异常”，优先清理缓存或强制刷新快照。
 
 ---
 
@@ -254,6 +311,25 @@ canonical key 必须满足：
 8. **按家族解析 version/tier/mode/build**
    - 每个家族都有自己的解析器（`normalizeClaude/normalizeGemini/...`）。
    - 原则：只合并“同版本同 tier”。
+
+### 候选 actual 的选择（为什么会选这个 value）
+
+当某个 standard canonical key 在渠道里不存在同名模型时，脚本会在“同 canonical 分组的原始变体”里挑一个最合适的 `actual`。
+
+当前实现是一个可解释的打分策略（会在 Diff 里用 tags 展示原因）：
+
+- 倾向保留旧 value（`old` / `keep_old`）：减少无意义 churn，保护手工配置
+- 倾向选择带组织前缀的真实名（`org`）：例如 `anthropic/...`、`google/...`
+- 倾向选择带明显日期后缀的版本化名（`date`）：例如 `-20250929`
+- 轻微偏好带 4 位批次号的版本（`build`）：例如 `-0528`/`-0414`
+- 识别并保留同款模型 mode（`mode`）：例如 `-thinking` / `:thinking`
+- 强烈避开 wrapper 型入口（例如 `假流式/`、`流式抗截断/` 会被显著降权）
+
+注意：无论打分多高，候选必须满足硬约束：
+
+- 必须是渠道 `models` 中真实存在的原始字符串
+- 不能落入标准集合（避免别名互映/回环温床）
+- 默认不能复用同一个 actual value（pinned key 例外）
 
 ### pinned key（批次锁定）规则
 
@@ -371,6 +447,34 @@ pinned key 的语义：
    - dry-run 在 Worker 里跑，避免卡住主线程
 3. **渲染限制**
    - Diff/Plan/DB 视图在极端情况下会做条目上限（防止浏览器崩溃）
+
+---
+
+## 规模与性能参考（来自 Dawn 实例，2026-02-14）
+
+这不是硬指标，只是帮助你估算“dry-run/渲染/写库”会有多重：
+
+- 渠道数：113
+- 渠道 models 总实例数（逗号拆分后的总条目）：10197
+- 唯一模型名（去重后）：1199
+
+粗略家族命中（按字符串包含判断，仅作参考）：
+
+- qwen: 1541
+- gpt: 1277
+- gemini: 1029
+- deepseek: 821
+- claude: 607
+- glm: 640
+- llama: 551
+- kimi: 549
+- mistral: 453
+- grok: 336
+
+建议：
+
+- 渠道很多时，优先用“左侧搜索 + 每页 10/20”定位；不要一口气把所有视图全展开滚动。
+- dry-run 性能主要受“渠道数量 * 每渠道 models 数量 * 标准集合大小”影响；缓存快照能显著减少重复拉取时间。
 
 ---
 
