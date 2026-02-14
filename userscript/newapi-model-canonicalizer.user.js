@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         New-API Model Canonicalizer (Redirect Toolkit)
 // @namespace    https://github.com/Dawn6666666/newapi-model-canonicalizer
-// @version      0.6.13
+// @version      0.6.14
 // @description  Canonicalize model names and rebuild New-API channel model_mapping in-browser (dry-run -> apply), preventing alias cycles.
 // @author       Dawn
 // @homepageURL  https://github.com/Dawn6666666/newapi-model-canonicalizer
@@ -18,7 +18,7 @@
 
   // For debugging: if you still see SyntaxError, you're running an older cached userscript.
   // eslint-disable-next-line no-console
-  const SCRIPT_VERSION = '0.6.13';
+  const SCRIPT_VERSION = '0.6.14';
   console.log('[na-mr] userscript loaded, version=' + SCRIPT_VERSION);
 
   function uniqChannelsById(channels) {
@@ -340,6 +340,150 @@
       req.onsuccess = () => resolve(true);
       req.onerror = () => reject(req.error);
     });
+  }
+
+  // =========================
+  // Checkpoints（强制写库前存档）
+  // =========================
+  const CHECKPOINTS_KEY = 'checkpoints_v1';
+  const CHECKPOINTS_MAX = 20; // 超出后丢弃最旧的存档点，避免 IndexedDB 过大
+
+  function makeCheckpointId() {
+    return 'cp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function deepCloneJSON(x) {
+    // 只用于备份 JSON 对象（model_mapping）；避免引用同一对象导致后续被修改。
+    try {
+      return JSON.parse(JSON.stringify(x || {}));
+    } catch {
+      return {};
+    }
+  }
+
+  async function getCheckpoints() {
+    const list = await idbGet(CHECKPOINTS_KEY);
+    return Array.isArray(list) ? list : [];
+  }
+
+  async function putCheckpoints(list) {
+    const arr = Array.isArray(list) ? list : [];
+    await idbSet(CHECKPOINTS_KEY, arr);
+    return arr;
+  }
+
+  async function addCheckpoint(cp) {
+    const list = await getCheckpoints();
+    list.push(cp);
+    // newest last; trim oldest
+    while (list.length > CHECKPOINTS_MAX) list.shift();
+    await putCheckpoints(list);
+    return cp;
+  }
+
+  async function deleteCheckpointById(id) {
+    const cid = String(id || '');
+    if (!cid) return false;
+    const list = await getCheckpoints();
+    const next = list.filter((x) => String(x && x.id) !== cid);
+    await putCheckpoints(next);
+    return next.length !== list.length;
+  }
+
+  function summarizeMappingDiff(before, after) {
+    const d = mappingDiff(before || {}, after || {});
+    return {
+      added: Object.keys(d.added || {}).length,
+      removed: Object.keys(d.removed || {}).length,
+      changed: Object.keys(d.changed || {}).length,
+      total: Object.keys(d.added || {}).length + Object.keys(d.removed || {}).length + Object.keys(d.changed || {}).length,
+      diff: d,
+    };
+  }
+
+  async function fetchChannelDetail(channelId) {
+    // New-API 提供单渠道详情接口：GET /api/channel/:id
+    const cid = String(channelId || '').trim();
+    if (!cid) throw new Error('channel_id_empty');
+    const data = await fetchJSON(`/api/channel/${encodeURIComponent(cid)}`);
+    // 兼容不同返回结构
+    const it = (data && data.data) ? data.data : (data && data.item) ? data.item : data;
+    if (!it || it.id == null) throw new Error('channel_detail_missing');
+    return it;
+  }
+
+  async function buildCheckpointBeforeWrite(kind, channelPlans, note) {
+    // channelPlans: [{ id, after, plan_diff }] where after is planned mapping object.
+    const id = makeCheckpointId();
+    const ts = Date.now();
+    const settings = {
+      pinnedKeys: !!state.pinnedKeys,
+      families: Array.from(state.families || []),
+      theme: state.theme || 'dark',
+    };
+    const meta = {
+      id,
+      ts,
+      kind: String(kind || 'apply'),
+      note: note ? String(note) : '',
+      script_version: SCRIPT_VERSION,
+      snapshot_ts: state.snapshot ? state.snapshot.ts : null,
+      plan_ts: state.plan ? state.plan.ts : null,
+      settings,
+      channels: [],
+      stats: { channels: 0, diff_total: 0, added: 0, removed: 0, changed: 0 },
+    };
+
+    const total = channelPlans.length || 1;
+    for (let i = 0; i < channelPlans.length; i++) {
+      const item = channelPlans[i];
+      const cid = String(item.id);
+      // 进度：备份阶段
+      state.progress = { pct: Math.min(99, Math.floor(((i + 1) * 100) / total)), text: `备份 ${i + 1}/${total} | channel ${cid}` };
+      render();
+      let beforeMap = {};
+      let chName = '';
+      let chGroup = '';
+      let chStatus = null;
+      let modelsCount = 0;
+      try {
+        const d = await fetchChannelDetail(cid);
+        chName = d.name || '';
+        chGroup = d.group || '';
+        chStatus = d.status;
+        const mm = safeParseJSON(d.model_mapping) || {};
+        beforeMap = mm;
+        modelsCount = toModelList(d.models).length;
+      } catch (e) {
+        // fallback：使用快照里的值（可能不是最新，但总比没有强）
+        const ch = (state.snapshot && state.snapshot.channels) ? state.snapshot.channels.find((x) => String(x.id) === cid) : null;
+        if (ch) {
+          chName = ch.name || '';
+          chGroup = ch.group || '';
+          chStatus = ch.status;
+          modelsCount = Array.isArray(ch.models) ? ch.models.length : 0;
+          beforeMap = ch.model_mapping || {};
+        }
+      }
+      const afterMap = item.after || {};
+      const s = summarizeMappingDiff(beforeMap, afterMap);
+      meta.channels.push({
+        id: Number(cid),
+        name: String(chName || ''),
+        group: String(chGroup || ''),
+        status: chStatus,
+        models_count: modelsCount,
+        before: deepCloneJSON(beforeMap),
+        after: deepCloneJSON(afterMap),
+        diff: s.diff,
+      });
+      meta.stats.channels += 1;
+      meta.stats.added += s.added;
+      meta.stats.removed += s.removed;
+      meta.stats.changed += s.changed;
+      meta.stats.diff_total += s.total;
+    }
+    return addCheckpoint(meta);
   }
 
   function safeParseJSON(str) {
@@ -1698,6 +1842,11 @@
         const d = rec.diff || {};
         return Object.keys(d.added || {}).length || Object.keys(d.removed || {}).length || Object.keys(d.changed || {}).length;
       });
+      // 强制写库前存档：只备份“本次将写入”的渠道，避免整库备份过大。
+      if (entries.length) {
+        const plans = entries.map(([cid, rec]) => ({ id: cid, after: rec.after || {} }));
+        await buildCheckpointBeforeWrite('apply_all', plans, `apply_all:${entries.length}`);
+      }
       const total = entries.length || 1;
       let done = 0;
       const okList = [];
@@ -1764,8 +1913,67 @@
       const ok = confirm(`即将写入 channel ${cid}：请确认你已在仪表盘详情页审阅无误。继续写入？`);
       if (!ok) return;
     }
+    // 强制写库前存档（单渠道）。
+    await buildCheckpointBeforeWrite('apply_one', [{ id: cid, after: rec.after || {} }], `apply_one:${cid}`);
     const payload = { id: Number(cid), model_mapping: JSON.stringify(rec.after || {}) };
     await fetchJSON('/api/channel/', { method: 'PUT', body: JSON.stringify(payload) });
+  }
+
+  async function rollbackCheckpoint(checkpointId) {
+    const id = String(checkpointId || '');
+    if (!id) throw new Error('checkpoint_id_empty');
+    const cps = await getCheckpoints();
+    const cp = cps.find((x) => x && String(x.id) === id);
+    if (!cp) throw new Error('checkpoint_not_found');
+    const channels = Array.isArray(cp.channels) ? cp.channels : [];
+    if (!channels.length) throw new Error('checkpoint_empty');
+
+    // 回滚前强制再存一份“回滚前快照”，避免覆盖当前手工修复后的映射且无法找回。
+    const targetPlans = channels.map((c) => ({ id: c.id, after: (c && c.before) ? c.before : {} }));
+    await buildCheckpointBeforeWrite('rollback_pre', targetPlans, `pre_rollback_of:${id}`);
+
+    state.applying = true;
+    state.progress = { pct: 1, text: `回滚中... (${id})` };
+    render();
+    const okList = [];
+    const failList = [];
+    const total = channels.length || 1;
+    const tAll0 = Date.now();
+    try {
+      for (let i = 0; i < channels.length; i++) {
+        const c = channels[i] || {};
+        const cid = String(c.id);
+        const title = (c && c.name) ? (`${cid} ${String(c.name)}`) : cid;
+        const t0 = Date.now();
+        const pct = Math.floor(((i + 1) * 100) / total);
+        state.progress = { pct, text: `回滚 ${i + 1}/${total} | ${title}` };
+        render();
+        try {
+          const payload = { id: Number(cid), model_mapping: JSON.stringify(c.before || {}) };
+          await fetchJSON('/api/channel/', { method: 'PUT', body: JSON.stringify(payload) });
+          const dt = (Date.now() - t0) / 1000;
+          okList.push({ id: Number(cid), name: c.name || '', seconds: Number(dt.toFixed(2)) });
+        } catch (e) {
+          const dt = (Date.now() - t0) / 1000;
+          failList.push({ id: Number(cid), name: c.name || '', seconds: Number(dt.toFixed(2)), error: String(e && e.message ? e.message : e) });
+        }
+      }
+      await idbSet('snapshot', null);
+      const elapsedAll = (Date.now() - tAll0) / 1000;
+      state.progress = { pct: 100, text: `回滚完成：成功 ${okList.length} / 失败 ${failList.length} | 用时 ${elapsedAll.toFixed(1)}s` };
+      state.lastApply = { ts: Date.now(), total: channels.length, ok: okList, failed: failList, elapsed_s: Number(elapsedAll.toFixed(2)), kind: 'rollback', checkpoint_id: id };
+    } finally {
+      state.applying = false;
+      render();
+    }
+  }
+
+  async function rollbackLastCheckpoint() {
+    const cps = await getCheckpoints();
+    // 默认只回滚最近一次“写入相关”的存档点（apply_one/apply_all）
+    const last = cps.slice().reverse().find((x) => x && (String(x.kind) === 'apply_all' || String(x.kind) === 'apply_one'));
+    if (!last) throw new Error('no_apply_checkpoint');
+    return rollbackCheckpoint(last.id);
   }
 
   function openDashboard() {
@@ -2148,6 +2356,53 @@
       grid-template-columns: 1fr 1fr;
       gap: 8px;
     }
+    /* Modal (checkpoints) */
+    .modalMask {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      backdrop-filter: blur(6px);
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+    }
+    :root[data-theme="light"] .modalMask { background: rgba(0,0,0,0.22); }
+    .modal {
+      width: min(980px, 96vw);
+      max-height: min(78vh, 820px);
+      overflow: auto;
+      border-radius: 14px;
+      border: 1px solid var(--border2);
+      background: rgba(25,25,24,0.92);
+      box-shadow: var(--shadow-md);
+      padding: 12px;
+    }
+    :root[data-theme="light"] .modal { background: rgba(250,249,246,0.96); }
+    .modalH {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 6px 6px 10px 6px;
+      border-bottom: 1px solid var(--border2);
+      margin-bottom: 10px;
+    }
+    .modalTitle { font-weight: 900; font-family: var(--serif); }
+    .cpList { display: grid; gap: 10px; }
+    .cpItem {
+      border: 1px solid var(--border2);
+      border-radius: 12px;
+      background: rgba(36,36,35,0.55);
+      padding: 10px;
+    }
+    :root[data-theme="light"] .cpItem { background: rgba(255,255,255,0.70); }
+    .cpMeta { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    .cpMetaL { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .cpK { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .cpBtns { display:flex; gap:8px; flex-wrap:wrap; }
+    .cpBtns button { padding: 6px 8px; }
     @media (max-width: 1100px) {
       .layout { grid-template-columns: 1fr; }
       .col { min-height: auto; }
@@ -2246,6 +2501,8 @@
         <div class="card-b">
           <div class="row">
             <button id="applyOne">写入此渠道</button>
+            <button id="btnRollbackLast">回滚上次</button>
+            <button id="btnCheckpoints">存档点</button>
             <button id="copyDB">复制 DB JSON</button>
             <button id="copyPlan">复制 Plan JSON</button>
             <button id="copyDiff">复制 Diff JSON</button>
@@ -2266,6 +2523,22 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="modalMask" id="cpMask">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="存档点">
+      <div class="modalH">
+        <div class="modalTitle">存档点（写库前强制备份）</div>
+        <div class="row" style="gap:8px;">
+          <button id="cpExport">导出 JSON</button>
+          <button id="cpClose">关闭</button>
+        </div>
+      </div>
+      <div class="muted" style="margin:0 6px 10px 6px;">
+        提示：回滚会先自动创建“回滚前快照”，避免覆盖当前手工修复后的映射。
+      </div>
+      <div class="cpList" id="cpList"></div>
     </div>
   </div>
 
@@ -2310,6 +2583,8 @@
         el('btnDryRun').disabled = disabled || !st.snapshot;
         el('btnApply').disabled = disabled || !st.plan;
         el('applyOne').disabled = disabled || !st.plan || !st.selectedChannelId;
+        el('btnRollbackLast').disabled = disabled;
+        el('btnCheckpoints').disabled = disabled;
         el('prevPage').disabled = disabled;
         el('nextPage').disabled = disabled;
       }
@@ -2730,6 +3005,112 @@
       el('copyDB').addEventListener('click', () => { const { db } = currentMaps(); copyText(JSON.stringify(db||{}, null, 2)); });
       el('copyPlan').addEventListener('click', () => { const { plan } = currentMaps(); copyText(JSON.stringify(plan||{}, null, 2)); });
       el('copyDiff').addEventListener('click', () => { const { diff } = currentMaps(); copyText(JSON.stringify(diff||{}, null, 2)); });
+
+      function fmtTs(ts) {
+        try { return new Date(Number(ts||0)).toLocaleString(); } catch { return String(ts||''); }
+      }
+
+      async function renderCheckpoints() {
+        const mask = el('cpMask');
+        const box = el('cpList');
+        box.innerHTML = '<div class="muted" style="padding:6px;">加载中...</div>';
+        const cps = await tool.getCheckpoints();
+        const list = Array.isArray(cps) ? cps.slice().reverse() : [];
+        if (!list.length) {
+          box.innerHTML = '<div class="muted" style="padding:6px;">暂无存档点：只有在写入数据库前才会自动创建。</div>';
+          return;
+        }
+        const parts = [];
+        for (const cp of list) {
+          const id = String(cp && cp.id ? cp.id : '');
+          const kind = String(cp && cp.kind ? cp.kind : '');
+          const stt = cp && cp.stats ? cp.stats : {};
+          const nCh = Number(stt.channels || (cp.channels ? cp.channels.length : 0) || 0);
+          const nDiff = Number(stt.diff_total || 0);
+          parts.push(
+            '<div class="cpItem" data-id="' + escapeHtml(id) + '">' +
+              '<div class="cpMeta">' +
+                '<div class="cpMetaL">' +
+                  '<div style="font-weight:900;">' + escapeHtml(kind || 'checkpoint') + '</div>' +
+                  '<div class="cpK">' + escapeHtml(fmtTs(cp.ts)) + '</div>' +
+                  '<div class="badge warn">channels ' + nCh + '</div>' +
+                  '<div class="badge">diff ' + nDiff + '</div>' +
+                  '<div class="cpK">id ' + escapeHtml(id) + '</div>' +
+                '</div>' +
+                '<div class="cpBtns">' +
+                  '<button class="primary" data-act="rb">回滚</button>' +
+                  '<button data-act="del">删除</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>'
+          );
+        }
+        box.innerHTML = parts.join('');
+        box.querySelectorAll('button[data-act]').forEach((b) => {
+          b.addEventListener('click', async (ev) => {
+            const btn = ev.currentTarget;
+            const act = btn.getAttribute('data-act');
+            const item = btn.closest('.cpItem');
+            const id = item ? String(item.getAttribute('data-id') || '') : '';
+            if (!id) return;
+            if (act === 'del') {
+              const ok = confirm('删除该存档点？（不可恢复）');
+              if (!ok) return;
+              await tool.deleteCheckpoint(id);
+              await renderCheckpoints();
+              return;
+            }
+            if (act === 'rb') {
+              const ok = confirm('即将回滚到该存档点。回滚会覆盖这些渠道当前的 model_mapping，且会先自动备份“回滚前快照”。继续？');
+              if (!ok) return;
+              try {
+                setButtonsDisabled(true);
+                setProgress(1, '回滚中...');
+                await tool.rollbackById(id, (p)=> setProgress(p.pct, p.text));
+                await tool.refreshSnapshot(true);
+                await refreshFromTool();
+                setProgress(100, '回滚完成');
+                await renderCheckpoints();
+                renderAll();
+              } catch (e) {
+                setProgress(0, '回滚失败: ' + (e && e.message ? e.message : e));
+              } finally {
+                setButtonsDisabled(false);
+              }
+            }
+          });
+        });
+        mask.style.display = 'flex';
+      }
+
+      el('btnCheckpoints').addEventListener('click', async () => {
+        await renderCheckpoints();
+      });
+      el('cpClose').addEventListener('click', () => { el('cpMask').style.display = 'none'; });
+      el('cpMask').addEventListener('click', (e) => { if (e.target && e.target.id === 'cpMask') el('cpMask').style.display = 'none'; });
+      el('cpExport').addEventListener('click', async () => {
+        const cps = await tool.getCheckpoints();
+        copyText(JSON.stringify(cps || [], null, 2));
+        alert('已复制到剪贴板（JSON）');
+      });
+
+      el('btnRollbackLast').addEventListener('click', async () => {
+        const ok = confirm('即将回滚“上一次写入”对应的存档点（整批）。回滚会先自动备份“回滚前快照”。继续？');
+        if (!ok) return;
+        try {
+          setButtonsDisabled(true);
+          setProgress(1, '回滚中...');
+          await tool.rollbackLast((p)=> setProgress(p.pct, p.text));
+          await tool.refreshSnapshot(true);
+          await refreshFromTool();
+          setProgress(100, '回滚完成');
+          renderAll();
+        } catch (e) {
+          setProgress(0, '回滚失败: ' + (e && e.message ? e.message : e));
+        } finally {
+          setButtonsDisabled(false);
+        }
+      });
 
       (async function init(){
         setButtonsDisabled(true);
@@ -3188,11 +3569,23 @@
 	        await applyPlanWithOpts(opts);
 	        if (typeof onProgress === 'function') onProgress({ pct: 100, text: '写入完成' });
 	      },
-	      applyOne: async (channelId, onProgress, opts) => {
-	        if (typeof onProgress === 'function') onProgress({ pct: 30, text: '提交更新...' });
-	        await applyOneWithOpts(channelId, opts);
-	        if (typeof onProgress === 'function') onProgress({ pct: 100, text: '写入完成' });
-	      },
+      applyOne: async (channelId, onProgress, opts) => {
+        if (typeof onProgress === 'function') onProgress({ pct: 30, text: '提交更新...' });
+        await applyOneWithOpts(channelId, opts);
+        if (typeof onProgress === 'function') onProgress({ pct: 100, text: '写入完成' });
+      },
+      getCheckpoints: async () => getCheckpoints(),
+      deleteCheckpoint: async (id) => deleteCheckpointById(id),
+      rollbackLast: async (onProgress) => {
+        if (typeof onProgress === 'function') onProgress({ pct: 1, text: '回滚中...' });
+        await rollbackLastCheckpoint();
+        if (typeof onProgress === 'function') onProgress({ pct: 100, text: '回滚完成' });
+      },
+      rollbackById: async (id, onProgress) => {
+        if (typeof onProgress === 'function') onProgress({ pct: 1, text: '回滚中...' });
+        await rollbackCheckpoint(id);
+        if (typeof onProgress === 'function') onProgress({ pct: 100, text: '回滚完成' });
+      },
 	    };
     // Load cached snapshot/plan for fast startup.
     try {
