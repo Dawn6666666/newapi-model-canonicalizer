@@ -1,0 +1,61 @@
+{
+  "note": "规则样例。实际生效逻辑请以 userscript 源码为准。",
+  "route_tag_exact_blacklist": [
+    "openrouter/free",
+    "openrouter/auto",
+    "openrouter/bodybuilder",
+    "switchpoint/router",
+    "switchpoint/auto",
+    "switchpoint/free"
+  ],
+  "hard_wrapper_prefixes": [
+    "image/",
+    "embedding/",
+    "rerank/",
+    "moderation/",
+    "假流式/",
+    "流式抗截断/"
+  ],
+  "mode_wrapper_prefixes": [
+    "thinking/",
+    "reasoning/",
+    "high/",
+    "low/"
+  ],
+  "specialized_keywords": [
+    "robotics",
+    "computer-use",
+    "tts",
+    "asr",
+    "stt",
+    "speech",
+    "transcription",
+    "embed",
+    "embedding",
+    "rerank",
+    "moderation",
+    "image-generation",
+    "video-generation"
+  ],
+  "annotated_keywords": [
+    "渠道",
+    "channel",
+    "上限",
+    "limit",
+    "输出",
+    "output",
+    "翻译",
+    "translate"
+  ],
+  "canonical_shape": "family-version-tier(-mode)?(-buildTag)?",
+  "pinned_key": {
+    "enabled": true,
+    "build_tag_source": "trailing numeric token",
+    "example": [
+      "deepseek-r1-0528",
+      "claude-4.5-sonnet-20250929",
+      "kimi-k2-instruct-0905"
+    ]
+  }
+}
+

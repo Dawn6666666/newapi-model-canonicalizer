@@ -1,0 +1,33 @@
+{
+  "note": "标准集合样例（canonical keys）。实际默认值在 userscript 的 DEFAULT_STANDARDS，并且 dry-run 会按语料自动补全。",
+  "claude": [
+    "claude-4.5-sonnet",
+    "claude-4.5-haiku",
+    "claude-4.5-opus",
+    "claude-4.1-opus",
+    "claude-4-opus",
+    "claude-4-sonnet",
+    "claude-4.6-opus",
+    "claude-3.7-sonnet",
+    "claude-3.5-sonnet",
+    "claude-3.5-haiku"
+  ],
+  "gemini": [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview"
+  ],
+  "gpt": [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-5",
+    "gpt-5-nano",
+    "o1",
+    "o3",
+    "o4-mini"
+  ]
+}
+
