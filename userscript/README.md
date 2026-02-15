@@ -114,6 +114,66 @@
 
 ---
 
+## 你看到的 models 很乱，但“很多不会出现在映射里”是正常的
+
+你在渠道里看到的是上游上报的 `models` 原始列表，它可能包含：
+
+- 不同供应商前缀：`cerebras/zai-glm-4.7`、`deepseek-ai/deepseek-v3.1`、`anthropic/claude-sonnet-4`
+- 不同分隔符/大小写：`DeepSeek-V3.1`、`GLM-4.7`
+- 批次/发布日期后缀：`claude-3-5-sonnet-20241022`、`claude-sonnet-4-5-20250929`
+- 包装器/特殊入口：`z-ai/glm-4.5-air:free`、`deepseek/deepseek-r1-0528:free`
+
+本脚本 **不会修改 `models` 列表本身**。脚本的输出是写回 `model_mapping`（canonical key -> actual）。
+
+因此，你会遇到两类“看起来没被归一化”的情况，但它们并不是 bug：
+
+### A) 无需映射（渠道本身已包含同名 canonical）
+
+脚本有一个重要的降噪规则：
+
+> 如果渠道 `models` 里已经存在与 canonical key 同名的模型，则跳过该 key 的映射生成（避免产生大量 `key==value` 的冗余映射）。
+
+结合你的列表，这些都属于典型的“无需映射”：
+
+- Qwen：`qwen-3-32b`、`qwen-3-4b`、`qwen-3-8b`、`qwen-3-coder-plus`、`qwen-3-max`
+- Grok：`grok-3`、`grok-4`、`grok-4.1`、`grok-4-fast`、`grok-code-fast`
+- GPT：`gpt-5`、`gpt-5-codex`、`gpt-5-codex-high`
+- GLM：`glm-4.6`、`glm-4.7`
+- Gemini：`gemini-3-pro-preview`
+
+它们不出现在 Diff/Plan 里，只代表“这个渠道已经能直接用 canonical 调用”，无需通过 `model_mapping` 再绕一层。
+
+### B) 按设计不参与通用重定向（避免误伤）
+
+你明确提出的目标是“把通用对话模型的入口统一起来”，而不是把所有模型（尤其是专项/管道/包装入口）都强行归到通用 canonical。
+
+因此脚本会排除一些类型的模型，不让它们进入“标准集合”或作为候选 value 参与重定向：
+
+1. **硬 wrapper 前缀（你希望直接用完整名调用）**
+   - 例如：`image/*`、`embedding/*`、`假流式/*`、`流式抗截断/*` 等
+2. **专项/模态/管道入口（非通用对话模型）**
+   - 例如：robotics、computer-use、tts/asr/stt/transcription、embedding/rerank/moderation、image-generation/video-generation 等
+3. **带用途/限额/渠道标注的模型**
+   - 例如：包含 `[渠道id:xx]`、`[輸出3k上限]`、`翻译`、`限速` 等
+4. **路由/标签（route/tag）**
+   - 例如：`openrouter/free`、`switchpoint/router`（按精确黑名单排除）
+
+这类模型如果要用：建议你直接在下游请求里填写它在 `models` 中的完整名字，不走重定向。
+
+### C) “需要映射”的典型例子（你列表里就有）
+
+当渠道里 **没有** 你想要的 canonical key，但存在同义变体时，脚本会生成映射：
+
+- Claude（日期/分隔符变体）
+  - `claude-3.5-sonnet` -> `claude-3-5-sonnet-20241022`
+  - `claude-4.5-sonnet` -> `claude-sonnet-4-5-20250929`
+- GLM（组织前缀/写法变体）
+  - `glm-4.7` -> `cerebras/zai-glm-4.7`（或 `zai-glm-4.7` / `z-ai/glm-4.7`，取决于该渠道实际 models）
+- DeepSeek（大小写/前缀变体）
+  - `deepseek-v3.1` -> `deepseek-ai/deepseek-v3.1`（或 `DeepSeek-V3.1`）
+
+---
+
 ## 数据结构（关键字段）
 
 ### 1) snapshot（快照）
