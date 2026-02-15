@@ -549,7 +549,13 @@
   }
 
   function safeParseJSON(str) {
-    if (!str || typeof str !== 'string') return null;
+    // New-API 不同版本/不同接口可能返回：
+    // - JSON string（常见：数据库里存的是 string）
+    // - object（部分接口会直接返回已反序列化的对象）
+    // 这里统一兼容，避免仪表盘 DB 视图永远显示空、diff 永远只显示 added。
+    if (!str) return null;
+    if (typeof str === 'object') return str;
+    if (typeof str !== 'string') return null;
     const t = str.trim();
     if (!t) return null;
     try {
