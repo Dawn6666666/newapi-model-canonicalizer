@@ -305,6 +305,17 @@
   const FETCH_MIN_GAP_MS = 140;
   const FETCH_MAX_RETRY = 6;
   const FETCH_BACKOFF_BASE_MS = 550;
+  const NO_RETRY_MARK = '__na_mr_no_retry__';
+
+  function markNoRetry(err) {
+    const e = err instanceof Error ? err : new Error(String(err || '请求失败'));
+    try { e[NO_RETRY_MARK] = true; } catch (_) {}
+    return e;
+  }
+
+  function isNoRetryError(err) {
+    return !!(err && err[NO_RETRY_MARK]);
+  }
 
   async function fetchJSON(url, opts = {}) {
     // 串行化请求，避免触发限流
@@ -326,11 +337,11 @@
           headers: { ...(opts.headers || {}), ...newApiHeaders() },
         });
 
-        if (!res.ok) {
-          // 429/5xx：做退避重试（PUT 写入是幂等覆盖，允许重试）
-          const status = Number(res.status) || 0;
-          const canRetry = status === 429 || status >= 500;
-          if (!canRetry) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+          if (!res.ok) {
+            // 429/5xx：做退避重试（PUT 写入是幂等覆盖，允许重试）
+            const status = Number(res.status) || 0;
+            const canRetry = status === 429 || status >= 500;
+            if (!canRetry) throw markNoRetry(new Error(`HTTP ${res.status} ${res.statusText}`));
 
           // Retry-After: seconds or date
           const ra = res.headers && res.headers.get ? res.headers.get('Retry-After') : null;
@@ -353,13 +364,24 @@
           continue;
         }
 
-        const data = await res.json();
+        let data = null;
+        try {
+          data = await res.json();
+        } catch (_) {
+          // 某些网关/反代在异常时可能返回非 JSON（如 HTML 错误页）。
+          // 这类情况通常不是可恢复的业务成功响应，直接抛出更可读的错误。
+          let body = '';
+          try { body = await res.text(); } catch (_) {}
+          const snippet = String(body || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+          throw markNoRetry(new Error(snippet ? (`响应非 JSON: ${snippet}`) : '响应非 JSON'));
+        }
         if (data && data.success === false) {
           // 业务层失败一般不建议盲目重试（可能是参数/权限问题）
-          throw new Error(data.message || '请求失败');
+          throw markNoRetry(new Error(data.message || '请求失败'));
         }
         return data;
       } catch (e) {
+        if (isNoRetryError(e)) throw e;
         lastErr = e;
         // 网络抖动也尝试重试
         const backoff = FETCH_BACKOFF_BASE_MS * Math.pow(2, Math.min(5, attempt - 1));
@@ -1824,7 +1846,9 @@
     `;
     const blob = new Blob([workerSrc], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
-    return new Worker(url);
+    const w = new Worker(url);
+    URL.revokeObjectURL(url);
+    return w;
   }
 
   async function loadSnapshot(force = false) {

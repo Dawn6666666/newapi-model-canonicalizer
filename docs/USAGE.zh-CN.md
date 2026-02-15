@@ -1,45 +1,53 @@
-# NewAPI Model Canonicalizer 使用指南（用户向）
+# NewAPI Model Canonicalizer 使用指南
 
-本文档只讲“怎么用”。规则原理与字段含义请看 `userscript/README.md`。
+本文档说明脚本的使用流程与常见问题。规则细节与实现说明见 `userscript/README.md`。
 
 ---
 
-## Canonicalization（归一化）是什么？这个脚本到底在干嘛？
+## 1. 功能概述
 
-一句话：**把“同一个模型的不同叫法”折叠成一个统一的标准名（canonical key）**，然后把这个标准名映射到每个渠道真实存在的模型名（actual）。
+脚本用于把渠道中的模型别名归一到统一的 canonical key，并生成/更新渠道 `model_mapping`：
 
-你在下游只需要记住统一的 canonical key，比如：
+- key：canonical（标准模型名）
+- value：渠道中真实存在的模型名（actual）
 
-- `claude-4.5-sonnet`
-- `gemini-2.5-pro`
-- `gpt-4.1-mini`
+主要约束：
 
-脚本会在每个渠道里生成/更新 `model_mapping`，让 New-API 按映射把请求路由到该渠道的真实模型名。
+- 同系列、同版本、同 tier（可选 mode/批次）才会归并
+- value 必须存在于该渠道 `models` 列表
+- 禁止互映与回环
 
-### 归一化的核心规则（只讲用户关心的）
+互映与回环示例：
 
-1. **同系列 + 同版本 + 同 tier（+可选 mode/批次）** 才会被折叠到同一个 canonical  
-   目的：既“统一入口”，又尽量不误伤不同用途的模型。
-2. **canonical 只做 key（标准名）**，value 必须是该渠道 `models` 里真实存在的字符串  
-   目的：避免写回一个渠道根本没有的模型名（这会导致无法命中/路由失败）。
-3. **禁止互映/回环**  
-   目的：避免出现 `A->B` 同时 `B->A`，或更长链条循环。
+错误示例（互映）：
 
-### 例子 1：Claude 的别名折叠（同模型不同叫法）
-
-渠道的 `models` 里可能出现这些写法（语义等价）：
-
-- `anthropic/claude-sonnet-4.5`
-- `claude-sonnet-4-5`
-- `claude-4.5-sonnet`
-
-脚本会统一成 canonical key：
-
-```text
-claude-4.5-sonnet
+```json
+{
+  "gpt-4.1": "gpt-4.1-mini",
+  "gpt-4.1-mini": "gpt-4.1"
+}
 ```
 
-并写回类似映射（每个渠道可能不同，以该渠道实际 models 为准）：
+错误示例（回环）：
+
+```json
+{
+  "a": "b",
+  "b": "c",
+  "c": "a"
+}
+```
+
+正确示例（单向映射到实际模型名）：
+
+```json
+{
+  "gpt-4.1": "openai/gpt-4.1-2025-xx-xx",
+  "gpt-4.1-mini": "openai/gpt-4.1-mini-2025-xx-xx"
+}
+```
+
+示例：
 
 ```json
 {
@@ -47,31 +55,60 @@ claude-4.5-sonnet
 }
 ```
 
-### 例子 2：Gemini 的前缀/大小写差异（仍归一到同 canonical）
+---
 
-可能出现：
+## 2. 安装与前置条件
 
-- `google/gemini-2.5-pro`
-- `Gemini-2.5-Pro`
+### 2.1 安装脚本
 
-归一后：
+1. 安装 Tampermonkey（或兼容 Userscript 扩展）
+2. 直接打开脚本安装链接（兼容扩展通常会自动识别并弹出安装）：[newapi-model-canonicalizer.user.js](https://github.com/Dawn6666666/newapi-model-canonicalizer/raw/refs/heads/main/userscript/newapi-model-canonicalizer.user.js)
+![Tampermonkey 安装页面](images/usage/01-tampermonkey-install.png)
+
+3. 备选：从仓库本地安装 [`userscript/newapi-model-canonicalizer.user.js`](https://github.com/Dawn6666666/newapi-model-canonicalizer/blob/main/userscript/newapi-model-canonicalizer.user.js)
+
+
+### 2.2 登录 New-API 控制台
+
+脚本依赖当前浏览器登录态（cookie + localStorage 中的用户信息）。
+
+访问：
+
+- `http(s)://<你的NewAPI域名>/console/channel`
+
+![New-API 渠道管理页入口](images/usage/02-console-channel-entry.png)
+
+---
+
+## 3. 使用流程
+
+默认路径是“全量渠道处理”：刷新全量快照后，直接 dry-run 全部渠道，并按审阅结果批量写入。
+
+### Step A：刷新全量渠道
+
+在 `/console/channel` 页面右下角打开 `模型重定向` 浮窗，点击 `刷新全量渠道`。
+
+作用：
+
+- 拉取渠道列表
+- 解析并缓存 `models` 与 `model_mapping`（IndexedDB）
+
+![浮窗-刷新全量渠道](images/usage/03-widget-refresh-snapshot.png)
+
+### Step B：选择家族与 pinned（可选）
+
+- `Families`：选择参与归一化的家族
+- `锁批次（pinned）`：是否额外生成 `base-buildTag` key
+
+示例（关闭 pinned）：
 
 ```json
 {
-  "gemini-2.5-pro": "google/gemini-2.5-pro"
+  "deepseek-r1": "deepseek-ai/deepseek-r1-0528"
 }
 ```
 
-### 例子 3：锁批次（pinned）让你精确指定“某个批次/发布日期”
-
-同一模型可能有不同批次（例如末尾 `0528`、`0905`、`2507` 等）。
-
-如果你开启「锁批次」：
-
-- base key：`deepseek-r1`
-- pinned key：`deepseek-r1-0528`
-
-写回可能是：
+示例（开启 pinned）：
 
 ```json
 {
@@ -80,315 +117,298 @@ claude-4.5-sonnet
 }
 ```
 
-为什么要 pinned：同款模型不同批次可能表现不同，你可以显式指定批次，避免“升级后效果变了”。
+![家族选择与 pinned 开关](images/usage/04-families-and-pinned-toggle.png)
 
-### 例子 4：什么不会被归一化（避免误伤）
+### Step C：运行 dry-run
 
-下面这种通常是“专项用途/包装前缀/限额标注/路由标签”，脚本倾向于**不**把它们归到标准模型里：
+点击 `运行 dry-run`，仅计算不写库。
 
-- `image/xxx`、`embedding/xxx`、`流式抗截断/xxx`
-- `openrouter/free`、`switchpoint/router`（更像路由/标签）
-- `gpt-5-nano [渠道id:33][輸出3k上限]`（明显是特殊用途）
+补充：
 
-如果你要用这类模型：建议直接用渠道 `models` 中的完整名字调用，不走重定向。
+- 在小浮窗运行 dry-run：按当前 Families 选择计算。
+- 在仪表盘运行 dry-run（`v0.6.16` 起）：如果顶部 family tab 不是 `all`，只计算该家族；`all` 时计算全家族。
 
----
+输出包括：
 
-## 0. 你会得到什么
+- 每渠道的 Diff（新增/删除/变更）
+- 计划写入后的 mapping（Plan）
+- 风险与告警
 
-你在 New-API 下游只需要调用一套**标准模型名（canonical key）**，脚本会为每个渠道生成：
+![dry-run 进度与完成状态](images/usage/05-dry-run-progress.png)
 
-- `canonical_key -> actual_model_full_name`
+### Step D：在仪表盘审阅
 
-并满足这些安全约束：
+点击 `打开仪表盘`，主要区域：
 
-- 不写回不存在于该渠道 `models` 列表里的 value
-- 禁止别名互映/回环
-- 同一个 actual（value）默认不会被多个 key 重复占用（pinned key 例外）
+1. 左侧：渠道列表与筛选
+2. 中间：`Diff / Plan / DB` 三种视图
+3. 右侧：写入、存档点、回滚、JSON 预览
 
----
+![仪表盘总览](images/usage/06-dashboard-overview.png)
 
-## 1. 安装与前置条件
+### Step E：写入数据库
 
-### 1.1 安装脚本
+写入方式：
 
-1. 安装 Tampermonkey（或同类 Userscript 扩展）
-2. 新建脚本，把仓库里的 Userscript 粘贴进去，或直接用 `@updateURL` 安装
+- `写入数据库`：批量写入所有有变更渠道（默认）
+- `写入此渠道`：仅当前渠道（排查或灰度时使用）
 
-图片占位符（待你补）：
-
-- `【图：Tampermonkey 安装页】`
-  - 截图位置：浏览器扩展商店 / Tampermonkey 详情页
-  - 用途：告诉用户在哪里安装
-
-### 1.2 登录 New-API 控制台
-
-脚本依赖当前浏览器里 New-API 的登录态（cookie + localStorage 的 user 信息）。
-
-你需要先打开并登录：
-
-- `http(s)://<你的NewAPI域名>/console/channel`
-
-图片占位符（待你补）：
-
-- `【图：New-API 渠道管理页 /console/channel】`
-  - 截图位置：New-API 控制台 -> 渠道管理
-  - 用途：告诉用户进入哪里用脚本
+![写入此渠道与写入数据库按钮位置](images/usage/07-apply-buttons.png)
 
 ---
 
-## 2. 快速上手（推荐流程）
+## 4. 输入与输出示例
 
-### Step A：刷新全量渠道快照
+示例 1（同模型不同写法归并）：
 
-在 `/console/channel` 页面右下角会出现脚本按钮 `模型重定向`，点开后：
-
-1. 点击 `刷新全量渠道`
-2. 等待完成（会显示渠道数、快照时间）
-
-图片占位符（待你补）：
-
-- `【图：小浮窗 - 刷新全量渠道】`
-  - 截图位置：/console/channel 页面右下角脚本浮窗
-  - 用途：让用户知道先点哪个按钮
-
-说明：
-
-- “快照”是脚本本地缓存（IndexedDB）的渠道列表与 `models/model_mapping`，用于加速 dry-run 与存档。
-- 如果你刚同步过模型列表或改过映射，建议先刷新快照。
-
-### Step B：选择家族 + 锁批次（可选）
-
-浮窗里有 `Families` 选择：
-
-- 勾选你要处理的家族（例如 `claude/gemini/gpt/qwen/...`）
-
-“锁批次（pinned）”开关建议：
-
-- 默认可以开启：会额外生成带日期/批次的 key（例如 `deepseek-r1-0528`）
-- 如果你只想维护最少 key：可以关闭
-
-举例：
-
-- 关闭锁批次：只会写 `deepseek-r1 -> deepseek-ai/deepseek-r1-0528`（举例）
-- 开启锁批次：还会写 `deepseek-r1-0528 -> deepseek-ai/deepseek-r1-0528`（便于精确指定批次）
-
-图片占位符（待你补）：
-
-- `【图：仪表盘顶栏 - 锁批次开关位置】`
-  - 截图位置：点击“打开仪表盘”后的页面顶栏
-  - 用途：告诉用户 pinned 开关在哪里、有什么效果
-
-### Step C：运行 dry-run（只计算，不写库）
-
-点击 `运行 dry-run`：
-
-- dry-run 会在浏览器本地计算所有渠道的“计划写入映射”
-- 不会修改数据库
-
-补充说明（避免困惑）：
-
-- 如果你是在“仪表盘”里运行 dry-run：当你把顶部家族切到某一个（例如 `gemini`）再点击 `运行 dry-run`，脚本会**只计算该家族**，避免出现“我只想看 gemini，却混进 kimi/mistral/deepseek”的情况。
-- 想跑全量：把家族切回 `all` 再运行。
-
-你会得到：
-
-- 每个渠道的 Diff（新增/删除/变更）
-- 风险提示（例如 value 不在 models）
-
-图片占位符（待你补）：
-
-- `【图：dry-run 进度条与完成提示】`
-  - 截图位置：仪表盘顶栏 / 浮窗进度条
-  - 用途：告诉用户 dry-run 过程中看到什么
-
-### Step D：打开仪表盘审阅（强烈建议）
-
-点击 `打开仪表盘`，进入三栏审阅界面：
-
-1. 左侧：渠道列表（支持搜索、仅 enabled、仅有变更、分页）
-2. 中间：Diff / Plan / DB 三种视图
-3. 右侧：操作详情（写入、存档点、回滚、JSON 预览）
-
-图片占位符（待你补）：
-
-- `【图：仪表盘全局布局总览】`
-  - 截图位置：仪表盘首页
-  - 用途：让用户建立“左中右三栏”的心智模型
-
-### Step E：写入数据库（Apply）
-
-写入前建议检查两件事：
-
-1. 中间 `Diff` 视图里是否存在红色高亮行（异常）
-2. 右侧 `风险` 是否为 0，或你是否确认这些风险可接受
-
-写入有两种方式：
-
-- `写入数据库`：按 dry-run 计划，写入**所有有变更**的渠道
-- `写入此渠道`：只写当前选中的渠道（推荐先用它做灰度验证）
-
-图片占位符（待你补）：
-
-- `【图：右侧操作详情 - 写入此渠道 / 写入数据库】`
-  - 截图位置：仪表盘右侧“操作详情”
-  - 用途：告诉用户在哪里写入
-
----
-
-## 3. 仪表盘怎么读（最常用的 3 个视图）
-
-### 3.1 Diff（最常用）
-
-Diff 是“DB 当前值”和“计划写入值”的差异列表，列含义：
-
-- `op`：`+` 新增、`-` 删除、`~` 变更
-- `key`：canonical key（写入 DB 的 key）
-- `from`：写入前 value（DB 里原来的 value）
-- `to`：计划写入 value（渠道真实模型全名）
-
-示例：
+渠道 `models`：
 
 ```text
-+  claude-4.5-sonnet   -> anthropic/claude-sonnet-4.5
-~  gpt-5               gpt-5-2025-08-07 -> gpt-5
+anthropic/claude-sonnet-4.5, claude-sonnet-4-5, claude-4.5-sonnet
 ```
 
-### 3.2 Plan（计划写入后的完整 mapping）
-
-Plan 视图展示“本次 dry-run 计算出的完整 mapping”，你可以把它理解为“写入后应当长什么样”。
-
-示例（节选）：
+生成的 `model_mapping`（示例）：
 
 ```json
 {
-  "claude-4.5-sonnet": "anthropic/claude-sonnet-4.5",
-  "gpt-4.1-mini": "openai/gpt-4.1-mini"
+  "claude-4.5-sonnet": "anthropic/claude-sonnet-4.5"
 }
 ```
 
-### 3.3 DB（当前数据库 mapping）
+示例 2（含 wrapper/route 的输入）：
 
-DB 视图展示“当前数据库里的 `model_mapping`”。
-
-用途：
-
-- 写入后复核：你可以切到 DB 视图确认 key/value 是否已经落库
-
----
-
-## 4. 异常与风险怎么处理
-
-### 4.1 为什么有的行会被红色高亮？
-
-红色高亮表示**异常/风险**。
-
-最常见的一种是：
-
-- `value_not_in_models`：脚本计划写入的 value 不存在于该渠道 `models` 列表中
-
-举例（这条不建议直接写入）：
+渠道 `models`：
 
 ```text
-key: grok-4
-to:  grok-4-heavy
+google/gemini-2.5-pro, Gemini-2.5-Pro, image/gpt-image-1, openrouter/free
 ```
 
-如果 `grok-4-heavy` 不在该渠道 `models` 里，写入后可能导致无法命中实际模型。
+生成的 `model_mapping`（示例）：
 
-处理办法（任选其一）：
+```json
+{
+  "gemini-2.5-pro": "google/gemini-2.5-pro"
+}
+```
 
-1. 先做“模型同步/更新渠道 models”，让该 value 真正出现在 `models` 中
-2. 或调整你选择的渠道/家族开关，再跑 dry-run
+说明：`image/gpt-image-1` 与 `openrouter/free` 通常不进入标准重定向。
 
-图片占位符（待你补）：
+示例 2.1（已经有同名 canonical，不会新增映射）：
 
-- `【图：异常高亮示例 - value_not_in_models】`
-  - 截图位置：仪表盘 Diff 视图
-  - 用途：让用户能一眼对照自己的情况
+渠道 `models`：
 
-### 4.2 右侧 “风险” 面板是什么意思？
+```text
+gpt-5, gpt-5-codex, qwen-3-32b
+```
 
-风险面板会汇总当前选中渠道的风险样本，例如：
+生成的 `model_mapping`（示例）：
 
-- value 不在 models
-- 规则告警（warnings）
+```json
+{}
+```
 
-你可以把它当作“写入前最后的安全检查清单”。
+说明：这些名字本身已可直接作为 canonical 调用，通常不会再写 `key == value` 的冗余映射。
+
+示例 3（pinned 开关对比）：
+
+关闭 pinned：
+
+```json
+{
+  "deepseek-r1": "deepseek-ai/deepseek-r1-0528"
+}
+```
+
+开启 pinned：
+
+```json
+{
+  "deepseek-r1": "deepseek-ai/deepseek-r1-0528",
+  "deepseek-r1-0528": "deepseek-ai/deepseek-r1-0528"
+}
+```
 
 ---
 
-## 5. 存档点与回滚（强烈建议学会）
+## 5. 视图说明
 
-### 5.1 写入前会自动存档吗？
+### 5.1 Diff
 
-会。脚本在写入前会强制创建“存档点”，记录：
+字段：
 
-- `before`：写入前该渠道的 `model_mapping`
-- `after`：本次计划写入的 `model_mapping`
+- `op`：`+` 新增，`-` 删除，`~` 变更
+- `key`：canonical key
+- `from`：写入前 value
+- `to`：计划写入 value
+
+判读示例：
+
+```text
++  claude-4.5-sonnet   -> anthropic/claude-sonnet-4.5
+~  gpt-4.1             openai/gpt-4.1 -> openai/gpt-4.1-2025-xx-xx
+-  qwen-3-32b          -> (removed)
+```
+
+含义：
+
+- `+`：新增标准入口
+- `~`：同 key 的 value 更新
+- `-`：旧条目被移除（通常不再满足规则）
+
+### 5.2 Plan
+
+展示本次 dry-run 计算出的完整写入结果（`after mapping`）。
+
+### 5.3 DB
+
+展示数据库当前 `model_mapping`。
+
+---
+
+## 6. 异常与风险
+
+常见异常：
+
+- `value_not_in_models`：计划写入的 value 不在该渠道 `models` 中
+
+处理方式：
+
+1. 先同步/更新渠道 `models`，再 dry-run
+2. 调整家族选择或范围，重新计算
+
+---
+
+## 7. 写入前检查清单
+
+```text
+[ ] 已刷新全量渠道快照
+[ ] 已完成 dry-run（全渠道）
+[ ] 已检查“仅异常”列表
+[ ] 已确认无无法解释的删除/变更
+[ ] 已确认 pinned 开关符合预期
+[ ] 准备执行“写入数据库”
+```
+
+---
+
+## 8. 存档点与回滚
+
+写入前脚本会创建存档点，记录：
+
+- `before`：写入前 mapping
+- `after`：计划写入 mapping
 - `diff`：差异统计
 
-注意：
+回滚方式：
 
-- 为避免 429 限流，`before` 默认使用“快照中的 DB 值”。所以写入前最好先 `刷新快照` 一次。
+1. `回滚上次`：回滚最近一次写入对应存档点
+2. `存档点`：从列表选择任意存档点回滚
 
-### 5.2 怎么回滚？
+![存档点列表与回滚入口](images/usage/08-checkpoints-and-rollback.png)
+![回滚页面](images/usage/09-rollback.png)
 
-两种方式：
 
-1. `回滚上次`：一键回滚到最近一次写入对应的存档点（整批）
-2. `存档点`：打开列表，选择任意存档点执行回滚
+说明：
 
-图片占位符（待你补）：
-
-- `【图：存档点列表 - 回滚/删除/导出】`
-  - 截图位置：仪表盘点击“存档点”后的 modal
-  - 用途：告诉用户回滚入口与按钮位置
+- 为减少请求压力，`before` 默认使用快照中的 DB 值。写入前刷新快照可降低偏差。
 
 ---
 
-## 6. 推荐用法（给新手的）
+## 9. 常见误区
 
-如果你是第一次用，建议按“灰度”走：
-
-1. 刷新快照
-2. 勾选 1-2 个家族（例如先 `claude`）
-3. dry-run
-4. 在仪表盘挑 1 个渠道 `写入此渠道`
-5. 验证 OK 后，再 `写入数据库` 批量写入
+1. 误区：`value` 可以写成任意模型名。
+实际：`value` 需要存在于该渠道 `models` 中。
+2. 误区：出现红色异常也可以直接批量写入。
+实际：红色异常通常表示命中风险，建议先处理。
+3. 误区：`image/`、`embedding/`、route/tag 会自动归并到标准模型。
+实际：这类名称通常被排除在重定向之外。
+4. 误区：开启 pinned 会替代基础 key。
+实际：pinned 是附加 key，不会替代 base key。
+5. 误区：dry-run 结果长期有效。
+实际：渠道模型变化后需要重新刷新快照并重跑 dry-run。
 
 ---
 
-## 7. 常见问题（FAQ）
+## 10. 规则速览
 
-### Q1：为什么我点了写入，提示 429 Too Many Requests？
+以下内容基于规则文档与样例整理，用于快速判断映射生成与排除条件：
 
-说明 New-API 管理端限流了。脚本会自动做退避重试，但你也可以：
+1. canonical key 形态约束  
+canonical 只允许小写字母、数字、`.`、`-`，并且不能包含 `/`。  
+示例：`claude-4.5-sonnet`、`deepseek-r1-0528`。
 
-- 先少量写入（单渠道）验证
-- 写入前刷新快照
-- 避免同时在多个浏览器/多个账号并发写入
+补充：
 
-### Q2：为什么计划里没有某些模型？
+- canonical 需要符合正则：`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`
+- canonical 需要以家族前缀开头（如 `claude-`、`gemini-`、`qwen-`）
+- gpt 家族允许 `gpt-` 以及 `o1/o3/o4` 前缀
+
+2. 不参与重定向的常见类型  
+- route/tag：`openrouter/free`、`switchpoint/router`  
+- pointer 别名：`*-latest/*-default/*-stable/*-current`  
+- hard wrapper：`image/`、`embedding/`、`stream/`、`假流式/`  
+- 专项模型：`tts/asr/stt/transcription/embed/rerank/moderation/image-generation/video-generation`  
+- 用途/限额标注：如 `[...]` 内含渠道、上限、翻译等说明
+
+3. mode 与 wrapper 的区别  
+- `thinking/`、`reasoning/`、`high/medium/low/` 属于 mode wrapper：会剥离前缀并保留 mode 到 canonical。  
+- `image/`、`embedding/` 等 hard wrapper：通常直接排除，不进通用重定向。
+
+4. pinned key 的批次来源  
+- Claude/Gemini/GPT：更偏向 8 位日期批次（如 `20250929`）  
+- Qwen/DeepSeek/GLM/Kimi 等：更偏向 4 位批次（如 `2507/0528/0414/0905`）
+
+5. 写入时 value 复用规则  
+- 默认：同一渠道内，同一个 actual value 只会分配给一个 base key（避免多 key 争抢同一 value）。  
+- 例外：pinned key 可以与 base key 复用同一个 actual value。
+
+---
+
+## 11. FAQ
+
+### Q1：写入出现 429 Too Many Requests
+
+New-API 管理端触发限流。可改为单渠道写入、降低并发写入频率，或稍后重试。
+
+处理示例：
+
+- 现象：批量写入中途报 429。
+- 原因：管理端限流。
+- 处理：等待后重试；必要时先按家族分批写入。
+
+补充：
+
+- 脚本会自动重试：网络异常、`429`、`5xx`
+- 脚本不会自动重试：`400/401/403` 和业务层失败（`success=false`）
+- 若接口返回非 JSON（例如网关错误页），会直接报错“响应非 JSON”
+
+### Q2：写入出现 401/403
+
+处理示例：
+
+- 现象：写入请求返回未授权/无权限。
+- 原因：当前登录账号缺少渠道更新权限，或登录态失效。
+- 处理：重新登录并确认账号权限后重试。
+
+### Q3：为什么某些模型没有进入计划
 
 常见原因：
 
-- 该模型属于 route/tag（路由标签）或 wrapper（如 `image/xxx`），脚本默认不参与重定向
-- 该渠道 `models` 列表里不存在可匹配的候选
+- 命中 route/tag 或 wrapper 规则（如 `image/xxx`）
+- 属于专项用途或标注模型，被排除
+- 在该渠道中没有可用候选 actual
+- 名称是 `*-latest/*-default/*-stable/*-current` 指针别名，默认不作为候选
+- 渠道里已存在同名 canonical，本次不会新增映射
 
-### Q3：我想用 `image/xxx`、`翻译`、`[输出上限]` 这种怎么办？
+### Q4：dry-run 后提示计划可能过期
 
-这类“专项用途模型”建议直接用**完整模型名**调用，不走重定向。
+处理示例：
 
----
+- 现象：仪表盘提示计划与快照/脚本版本不一致。
+- 原因：快照已变化或脚本已更新。
+- 处理：重新刷新全量渠道并重跑 dry-run。
 
-## 8. 截图清单（方便你后续补图）
+### Q5：`image/xxx`、`翻译`、`[输出上限]` 这类模型怎么用
 
-建议你补以下几张图，用户基本就能无障碍上手：
+这类模型通常不参与重定向，直接使用完整模型名调用。
 
-1. `【图：/console/channel 页面】`
-2. `【图：小浮窗（刷新快照/运行 dry-run/打开仪表盘）】`
-3. `【图：仪表盘总览（左渠道列表 + 中 Diff + 右操作详情）】`
-4. `【图：异常高亮示例（value_not_in_models）】`
-5. `【图：存档点 modal（回滚/删除/导出）】`
-6. `【图：写入此渠道 vs 写入数据库】`

@@ -5,23 +5,23 @@
 - 拉取所有渠道的 `models` 原始模型列表（快照）。
 - 对模型名进行归一化（canonicalization），把“同系列同版本同 tier(+mode/+build)”的各种别名折叠到同一套标准 key。
 - 生成每个渠道的 `standard(canonical) -> actual(真实模型名)` 的重定向映射计划（dry-run）。
-- 在你审阅后，将计划写回渠道的 `model_mapping` 字段（apply）。
+- 在审阅后，将计划写回渠道的 `model_mapping` 字段（apply）。
 
-核心目标：在上游命名参差不齐的情况下，让下游始终用统一模型名调用，同时 **禁止别名互映/回环**，并尽量避免“专项模型/路由标签/用途标记”污染重定向。
+核心目标：在上游命名不一致的情况下，为下游提供统一模型名入口，同时 **禁止别名互映/回环**，并避免“专项模型/路由标签/用途标记”进入通用重定向。
 
 ---
 
 ## 适用场景
 
-- 你有很多供应商渠道，模型名存在前缀/后缀/大小写/分隔符差异（如 `anthropic/claude-sonnet-4.5`、`claude-sonnet-4-5`、`claude-4.5-sonnet`）。
-- 你希望把它们统一到一个“标准调用名”（canonical key），例如统一用 `claude-4.5-sonnet` 调用。
-- 你已经启用了 New-API 的负载均衡/权重/优先级，希望模型命名统一后由 New-API 做路由与容灾。
+- 多供应商渠道场景下，模型名存在前缀/后缀/大小写/分隔符差异（如 `anthropic/claude-sonnet-4.5`、`claude-sonnet-4-5`、`claude-4.5-sonnet`）。
+- 需要将调用入口统一为“标准调用名”（canonical key），例如统一使用 `claude-4.5-sonnet`。
+- 已启用 New-API 负载均衡/权重/优先级，希望由统一模型名配合 New-API 完成路由与容灾。
 
 ---
 
 ## 安全与边界
 
-1. 本脚本 **不需要你输入密码**。
+1. 本脚本 **不需要输入密码**。
 2. 请求 New-API 的方式：
    - 使用浏览器当前已登录的会话 Cookie（`credentials: include`）。
    - 从 `localStorage.user` 读取 `user.id` 与 `user.token`（如存在）并拼接请求头：
@@ -31,10 +31,10 @@
    - `settings`：`pinnedKeys`、`theme`
    - `snapshot`：全量渠道快照（`channels[]`）
    - `plan`：dry-run 的结果（每渠道 before/after/diff/reasons/warnings）
-4. 本脚本不会上传你的 Token/渠道数据到第三方；所有计算在浏览器本地完成。
+4. 本脚本不会上传 Token/渠道数据到第三方；所有计算在浏览器本地完成。
 5. 权限要求：
    - 仅“预览 / dry-run”：能访问 `GET /api/channel/` 即可（通常是已登录后台可见渠道列表的权限）。
-   - “写入数据库”：需要你当前登录用户对渠道有 `PUT /api/channel/` 的更新权限，否则会写入失败。
+   - “写入数据库”：需要当前登录用户对渠道有 `PUT /api/channel/` 的更新权限，否则会写入失败。
 
 ---
 
@@ -102,21 +102,21 @@
 缓存与一致性提示：
 
 - `plan` 会记录 `script_version` 与 `snapshot_ts`。
-- 当脚本版本变化或快照变化时，仪表盘会提示“建议重跑”，避免你拿旧 plan 写入新快照导致不一致。
+- 当脚本版本变化或快照变化时，仪表盘会提示“建议重跑”，避免使用旧 plan 写入新快照导致不一致。
 
 写入前检查清单（建议每次 apply 前扫一遍）：
 
 - Diff 视图里没有明显“误伤”的专项模型（tts/embed/rerank/robotics/computer-use 等）。
-- `仅异常`（anom）为空，或你能解释清楚异常来源（value 不在 models 会写回失败或产生不可用映射）。
-- `pinned key` 开关符合你的预期：
+- `仅异常`（anom）为空，或异常来源可解释（value 不在 models 会写回失败或产生不可用映射）。
+- `pinned key` 开关符合预期：
   - 需要“锁批次”时开启（会生成 `*-2025xxxx` / `*-0414` / `*-2507` 等 key）
   - 只想要基础基准模型时关闭
 
 ---
 
-## 你看到的 models 很乱，但“很多不会出现在映射里”是正常的
+## models 列表与映射结果不完全一致是预期行为
 
-你在渠道里看到的是上游上报的 `models` 原始列表，它可能包含：
+渠道中的 `models` 是上游上报的原始列表，可能包含：
 
 - 不同供应商前缀：`cerebras/zai-glm-4.7`、`deepseek-ai/deepseek-v3.1`、`anthropic/claude-sonnet-4`
 - 不同分隔符/大小写：`DeepSeek-V3.1`、`GLM-4.7`
@@ -125,29 +125,29 @@
 
 本脚本 **不会修改 `models` 列表本身**。脚本的输出是写回 `model_mapping`（canonical key -> actual）。
 
-因此，你会遇到“看起来没被归一化 / 没出现在 Diff 里”的情况，但它们通常不是 bug。
+因此，出现“看起来没被归一化 / 没出现在 Diff 里”的情况通常不表示脚本异常。
 
-先给一个最重要的心智模型（建议记住这句）：
+核心模型：
 
-> `models` 是上游“真实可用名字”的集合；`model_mapping` 只负责把“你想统一调用的 canonical key”映射到其中某一个真实名字。  
+> `models` 是上游“真实可用名字”的集合；`model_mapping` 只负责把“统一调用的 canonical key”映射到其中某一个真实名字。  
 > 所以：**不是每一个 models 条目都需要（或应该）出现在映射里**。
 
 ### 如何判断“某个模型为什么没出现在 Diff/Plan 里”
 
-你可以按下面这个顺序快速定位原因（从最常见到最少见）：
+可按下面顺序定位原因（从常见到少见）：
 
 1. **它是 canonical key 本体，且在该渠道 models 里已存在同名**
    - 结果：无需映射，不会新增条目
 2. **它是专项/包装/用途标注/路由标签**
    - 结果：按设计排除，不参与通用重定向
 3. **它能被归一化，但不在标准集合（standard set）里**
-   - 结果：脚本不会为它生成 key（因为你没有把它当作“下游统一入口”）
+   - 结果：脚本不会为它生成 key（因为该模型未被纳入“下游统一入口”）
    - 解决：把它加入 `DEFAULT_STANDARDS.<family>` 或依赖 auto-extend（见后文“标准集合”）
 4. **它归一化失败（family/version/tier 解析不出）**
    - 结果：normalize 返回 null，条目被丢弃（避免污染标准集合与 key）
-   - 解决：需要补规则（但你当前说“不用再改”，这里仅说明机制）
+   - 解决：需要补规则（此处仅说明机制）
 
-下面用你这条渠道提供的 models 片段做更具体的解释与例子。
+下面使用一个渠道 `models` 片段做示例说明。
 
 ### A) 无需映射（渠道本身已包含同名 canonical）
 
@@ -155,7 +155,7 @@
 
 > 如果渠道 `models` 里已经存在与 canonical key 同名的模型，则跳过该 key 的映射生成（避免产生大量 `key==value` 的冗余映射）。
 
-结合你的列表，这些都属于典型的“无需映射”：
+结合示例列表，这些都属于典型的“无需映射”：
 
 - Qwen：`qwen-3-32b`、`qwen-3-4b`、`qwen-3-8b`、`qwen-3-coder-plus`、`qwen-3-max`
 - Grok：`grok-3`、`grok-4`、`grok-4.1`、`grok-4-fast`、`grok-code-fast`
@@ -165,9 +165,9 @@
 
 它们不出现在 Diff/Plan 里，只代表“这个渠道已经能直接用 canonical 调用”，无需通过 `model_mapping` 再绕一层。
 
-再强调一次：这不是“没归一化”，而是“归一化后发现已经同名可用，所以不需要写映射”。
+这里不是“未归一化”，而是“归一化后已同名可用，因此无需写映射”。
 
-如果你希望“即便同名也写一条显式映射（key==value）”，那属于另一种产品取舍：
+如果需要“即便同名也写一条显式映射（key==value）”，属于另一种产品取舍：
 
 - 好处：所有渠道的 `model_mapping` 看起来更一致
 - 坏处：DB 会被大量无意义条目填满，后期维护成本会更高
@@ -176,11 +176,11 @@
 
 ### B) 按设计不参与通用重定向（避免误伤）
 
-你明确提出的目标是“把通用对话模型的入口统一起来”，而不是把所有模型（尤其是专项/管道/包装入口）都强行归到通用 canonical。
+该策略面向“统一通用对话模型入口”，而非将所有模型（尤其专项/管道/包装入口）都归并到通用 canonical。
 
 因此脚本会排除一些类型的模型，不让它们进入“标准集合”或作为候选 value 参与重定向：
 
-1. **硬 wrapper 前缀（你希望直接用完整名调用）**
+1. **硬 wrapper 前缀（通常直接使用完整名调用）**
    - 例如：`image/*`、`embedding/*`、`假流式/*`、`流式抗截断/*` 等
 2. **专项/模态/管道入口（非通用对话模型）**
    - 例如：robotics、computer-use、tts/asr/stt/transcription、embedding/rerank/moderation、image-generation/video-generation 等
@@ -189,20 +189,20 @@
 4. **路由/标签（route/tag）**
    - 例如：`openrouter/free`、`switchpoint/router`（按精确黑名单排除）
 
-这类模型如果要用：建议你直接在下游请求里填写它在 `models` 中的完整名字，不走重定向。
+此类模型如需调用，通常直接在下游请求中使用 `models` 里的完整名字，不走重定向。
 
-结合你的列表，下面这些就属于“你能看到，但脚本不会把它当作通用重定向目标”的典型：
+结合示例列表，下面这些属于“可见但不会作为通用重定向目标”的典型：
 
 - `z-ai/glm-4.5-air:free`
   - `:free` 是渠道常见噪声 token，canonical 不会包含它；但它也更像“特殊入口/策略”，不建议让通用 key 映射到它。
 - `deepseek/deepseek-r1-0528:free`
   - 同上（free 噪声），而且 `deepseek-r1-0528` 本身已经是 pinned 语义，通常更适合被当作“精确批次 key”，而不是被其它 key 间接指向。
 - `grok-imagine-1.0-video`
-  - 这是一个更偏“生成式多模态入口”的名字；如果你要用它，建议直接调用完整名（是否参与通用重定向取决于你的策略开关与规则）。
+  - 这是更偏“生成式多模态入口”的名字；如需调用，通常直接使用完整名（是否参与通用重定向取决于策略开关与规则）。
 
-### C) “需要映射”的典型例子（你列表里就有）
+### C) “需要映射”的典型例子
 
-当渠道里 **没有** 你想要的 canonical key，但存在同义变体时，脚本会生成映射：
+当渠道里 **没有** 目标 canonical key、但存在同义变体时，脚本会生成映射：
 
 - Claude（日期/分隔符变体）
   - `claude-3.5-sonnet` -> `claude-3-5-sonnet-20241022`
@@ -212,7 +212,7 @@
 - DeepSeek（大小写/前缀变体）
   - `deepseek-v3.1` -> `deepseek-ai/deepseek-v3.1`（或 `DeepSeek-V3.1`）
 
-你可以把这类映射理解为：
+这类映射可理解为：
 
 - key：为了让下游“统一入口”去调用（canonical）
 - value：在该渠道里“真实存在且能用”的名字（actual）
@@ -227,21 +227,21 @@
 }
 ```
 
-### D) 为什么你会在同一个渠道看到“跨家族的映射一起出现”
+### D) 为什么同一个渠道会出现“跨家族映射”
 
-如果你运行的是 `all`（全量 families）dry-run，这个渠道的 `models` 同时包含：
+如果运行 `all`（全量 families）dry-run，且该渠道 `models` 同时包含：
 
 - claude / gemini / gpt / qwen / deepseek / grok / glm / kimi / mistral ...
 
-脚本就会为这些家族分别生成“该家族的 canonical -> 该渠道的 actual”。因此在 Diff/Plan 里你会看到：
+脚本会分别生成“该家族 canonical -> 该渠道 actual”。因此在 Diff/Plan 中会看到：
 
 - 既有 Claude（如 `claude-3.5-sonnet`）
 - 也有 DeepSeek（如 `deepseek-v3.1`）
 - 也有 GLM/Qwen/GPT...
 
-如果你只想审阅某一个家族：
+如仅需审阅某一个家族：
 
-- 在仪表盘顶部 tab 选中该家族（如 `qwen`），再点击 `运行 dry-run`（从 `v0.6.16` 起，仪表盘会只计算该 tab 对应的 family）。
+- 在仪表盘顶部 tab 选中该家族（如 `qwen`），再点击 `运行 dry-run`（从 `v0.6.16` 起，仪表盘只计算该 tab 对应 family）。
 
 ---
 
@@ -301,7 +301,7 @@
 
 提示：
 
-- 这些标签是“解释性信息”，不参与写库本身；但对你判断是否误伤/是否需要加黑名单非常有用。
+- 这些标签是“解释性信息”，不参与写库本身；可用于判断是否误伤或是否需要补充黑名单。
 - `pinned/date/build` 相关标签通常会一起出现（因为 pinned 的来源往往是日期/buildTag）。
 
 ### 异常（anom）说明：为什么某些行会变红
@@ -309,7 +309,7 @@
 Diff/Plan/DB 视图里，脚本会校验当前展示的 value 是否真实存在于渠道 `models` 列表：
 
 - 如果某条 value 不在 `models` 中，会标记为异常（行底色偏红）。
-- “仅异常”开关会只保留这些异常行，方便你定位“写回了不存在模型名”的风险。
+- “仅异常”开关会只保留这些异常行，便于定位“写回不存在模型名”的风险。
 
 ---
 
@@ -326,9 +326,9 @@ Diff/Plan/DB 视图里，脚本会校验当前展示的 value 是否真实存在
 1. 在浏览器开发者工具中：
    - Application / 存储（Storage） -> IndexedDB -> `na_mr_toolkit` -> 删除
 2. 直接点击「刷新快照」强制拉取，并重新 dry-run：
-   - 会覆盖旧缓存；写入成功后脚本也会把 `snapshot` 置空，提示你下次刷新。
+   - 会覆盖旧缓存；写入成功后脚本也会把 `snapshot` 置空，提示下次刷新。
 
-提示：如果你发现“plan 还是旧的 / 主题不对 / 显示异常”，优先清理缓存或强制刷新快照。
+提示：如发现“plan 还是旧的 / 主题不对 / 显示异常”，优先清理缓存或强制刷新快照。
 
 ---
 
@@ -376,7 +376,7 @@ Diff/Plan/DB 视图里，脚本会校验当前展示的 value 是否真实存在
      - 硬 wrapper 前缀（`image/`、`embedding/`、`假流式/` 等）
    - 最终对候选 canonical 进行 `canonicalOk()` 校验：形态不合法（含 `/`、含非法字符、前缀不匹配 family）会被丢弃。
 
-你可以把它理解为：
+可理解为：
 
 - `DEFAULT_STANDARDS` 提供“基础基准模型清单”
 - “自动补全”提供“从语料中长出来的增量基准模型清单”
@@ -403,7 +403,7 @@ canonical key 必须满足：
 
 ### 归一化流程（从 raw 到 canonical）
 
-为了减少误伤，脚本采用“先清洗、再识别家族、再按家族解析版本/形态”的流程。你可以把它理解为：
+为减少误伤，脚本采用“先清洗、再识别家族、再按家族解析版本/形态”的流程，可概括为：
 
 1. **用途备注清洗（不改变 actual，仅影响 canonical）**
    - 先移除中括号/小括号的备注文本：
@@ -417,7 +417,7 @@ canonical key 必须满足：
 
 3. **提取 wrapper（前缀包装器）**
    - “硬 wrapper”（HARD wrapper）：`image/`、`embedding/`、`假流式/`、`流式抗截断/` 等：
-     - 这类模型通常是专项用途入口，你的策略是“直接用完整模型名调用”，因此 **不参与重定向**（避免误伤）。
+      - 这类模型通常是专项用途入口，默认采用“直接用完整模型名调用”的策略，因此 **不参与重定向**（避免误伤）。
    - “mode wrapper”（MODE wrapper）：`thinking/`、`reasoning/`、`high/`、`low/` 等：
      - 会剥离前缀，但把 `thinking/reasoning/high/...` 作为 mode token 合入 canonical。
      - 例：`thinking/grok-4.1-thinking-1129` -> mode=`thinking`，主体=`grok-4.1-thinking-1129`
@@ -433,7 +433,7 @@ canonical key 必须满足：
 6. **token 清洗与折叠**
    - 折叠相邻重复 token：`kimi-k2-thinking-thinking` -> `kimi-k2-thinking`
    - 丢弃一些明确的 wrapper token（例如 `cursor2`）：
-     - 你已明确：`cursor2-*` 多为特殊用途入口，不应归并到基础模型，因此默认不进入 canonical。
+      - `cursor2-*` 多为特殊用途入口，不应归并到基础模型，因此默认不进入 canonical。
 
 7. **识别 family**
    - 优先从主体 tokens 判断家族（如 `claude/gemini/gpt/qwen/deepseek/grok/glm/kimi/llama/mistral`）。
@@ -454,7 +454,7 @@ canonical key 必须满足：
 - 倾向选择带明显日期后缀的版本化名（`date`）：例如 `-20250929`
 - 轻微偏好带 4 位批次号的版本（`build`）：例如 `-0528`/`-0414`
 - 识别并保留同款模型 mode（`mode`）：例如 `-thinking` / `:thinking`
-- 强烈避开 wrapper 型入口（例如 `假流式/`、`流式抗截断/` 会被显著降权）
+- 避开 wrapper 型入口（例如 `假流式/`、`流式抗截断/` 会被显著降权）
 
 注意：无论打分多高，候选必须满足硬约束：
 
@@ -495,7 +495,7 @@ pinned key 的语义：
 4. **专项/模态/管道模型**
    - robotics、computer-use、tts/asr/stt/speech/transcription、embed/rerank/moderation、image-generation/video-generation 等
 
-你的策略是：这些模型如果要用，直接调用它们在渠道 `models` 中的完整名字，不走重定向。
+默认策略：这些模型如需调用，直接使用渠道 `models` 中的完整名字，不走重定向。
 
 ### “同义折叠”的判定：只折叠同系列同版本同 tier(+mode/+build)
 
@@ -541,7 +541,7 @@ pinned key 的语义：
 4. **候选 actual 必须来自渠道真实 models 列表**
    - 不会把 canonical/别名写成 value（避免“写回不存在的模型名”）
 5. **带用途/限额标记的模型不参与重定向**
-   - 例如含 `[渠道id:xx][輸出3k上限]` 的模型，建议用户直接用完整模型名调用
+  - 例如含 `[渠道id:xx][輸出3k上限]` 的模型，建议直接使用完整模型名调用
 
 ---
 
@@ -557,7 +557,7 @@ pinned key 的语义：
   - `switchpoint/auto`
   - `switchpoint/free`
 
-你可以按实际语料继续扩充列表。
+可按实际语料继续扩充列表。
 
 ---
 
@@ -570,7 +570,12 @@ pinned key 的语义：
 - **限流（429）处理**
   - New-API 管理端可能对短时间内大量请求限流。
   - 脚本会自动做：请求串行化、最小间隔、以及 429/5xx 的指数退避重试（尊重 `Retry-After`）。
-  - 如果你频繁遇到 429：建议先 `刷新快照`，然后再写库；或分批写入（先少量渠道验证，再全量）。
+  - 重试边界：
+    - 会重试：网络异常、`429`、`5xx`
+    - 不重试：`4xx`（如 `400/401/403`）和业务层 `success=false` 错误
+  - 响应解析：
+    - 预期为 JSON；若返回非 JSON（如网关 HTML 错误页），会直接报错并附带响应片段（不重试）。
+  - 若频繁遇到 429：建议先 `刷新快照`，再写库；或分批写入（先少量渠道验证，再全量）。
 
 ---
 
@@ -589,25 +594,25 @@ pinned key 的语义：
   - 以及脚本版本、快照时间、plan 时间、关键开关（families/pinnedKeys/theme）
 - **关于 `before` 的来源（重要）**
   - 为避免“写库前对每个渠道再 GET 一次详情”导致 429，脚本默认使用**快照中的 `model_mapping`** 作为 `before`。
-  - 因此：如果你担心快照不够新，请在写库前先点一次 `刷新快照`，再跑 dry-run 并写库。
+   - 因此：如担心快照不够新，请在写库前先执行一次 `刷新快照`，再跑 dry-run 并写库。
 
 存档保存位置：
 
 - IndexedDB：`na_mr_toolkit` -> `kv` -> `checkpoints_v1`
 - 默认最多保留最近 **20** 个存档点（超出会自动丢弃最旧的），避免浏览器存储膨胀。
 
-在仪表盘里你可以：
+在仪表盘里可执行：
 
 - `回滚上次`：一键回滚到最近一次写入对应的存档点（整批）
 - `存档点`：查看列表、回滚到任意存档点、删除、导出 JSON
 
 ---
 
-## 写库后的验证与回滚（建议流程）
+## 写库后的验证与回滚（参考流程）
 
 ### 1) 写库后如何验证“真的生效”
 
-建议按“从 DB -> 从 UI -> 从实际调用”三层验证，尽量缩短排查路径：
+可按“从 DB -> 从 UI -> 从实际调用”三层验证，缩短排查路径：
 
 1. **DB 预览核对（最快）**
    - 在仪表盘选择一个刚写入的渠道：
@@ -625,19 +630,19 @@ pinned key 的语义：
      - 请求里 `model=claude-4.5-sonnet`（或 pinned：`claude-4.5-sonnet-20250929`）
    - 观察：
      - 是否成功路由（无 404/模型不存在）
-     - 是否命中你期望的渠道（New-API 日志/用量统计里一般能看到渠道选择结果）
+      - 是否命中预期渠道（New-API 日志/用量统计里通常可见渠道选择结果）
 
 ### 2) 发现问题如何回滚
 
-回滚建议尽量做到“可控 + 可审计”：
+回滚建议保持“可控 + 可审计”：
 
 1. **单渠道回滚（推荐）**
    - 在仪表盘里定位到误伤的渠道：
      - 先复制 `DB JSON` 备份到本地（用于审计）
-     - 然后手动在 New-API 渠道编辑页把 `model_mapping` 改回 `{}` 或改回你备份的 JSON
+     - 然后手动在 New-API 渠道编辑页把 `model_mapping` 改回 `{}` 或改回备份 JSON
 
 2. **全量清空（极端手段）**
-   - 如果你确定“全部映射都不可信”，可以把所有渠道的 `model_mapping` 清空为 `{}` 后重新跑 dry-run：
+   - 如果确认“全部映射都不可信”，可把所有渠道的 `model_mapping` 清空为 `{}` 后重新跑 dry-run：
      - 清空后再 `刷新快照 -> dry-run -> 逐步写入`
    - 注意：这会影响所有依赖重定向的下游调用，建议先在低峰执行。
 
@@ -646,7 +651,7 @@ pinned key 的语义：
 - 写入账号无权限：`PUT /api/channel/` 实际失败（仪表盘会提示失败条目）
 - 只写了少量渠道：脚本只写入有 diff 的渠道；其它渠道没变更不会写
 - value 不在 models：被标成异常（anom），New-API 可能无法命中该实际模型
-- 你在 New-API 前端又手动覆盖了 `model_mapping`（导致与脚本计划不一致）
+- 在 New-API 前端又手动覆盖了 `model_mapping`（导致与脚本计划不一致）
 
 ---
 
@@ -663,7 +668,7 @@ pinned key 的语义：
 
 ## 规模与性能参考（来自 Dawn 实例，2026-02-14）
 
-这不是硬指标，只是帮助你估算“dry-run/渲染/写库”会有多重：
+这不是硬指标，仅用于估算“dry-run/渲染/写库”规模：
 
 - 渠道数：113
 - 渠道 models 总实例数（逗号拆分后的总条目）：10197
@@ -682,7 +687,7 @@ pinned key 的语义：
 - mistral: 453
 - grok: 336
 
-建议：
+操作建议：
 
 - 渠道很多时，优先用“左侧搜索 + 每页 10/20”定位；不要一口气把所有视图全展开滚动。
 - dry-run 性能主要受“渠道数量 * 每渠道 models 数量 * 标准集合大小”影响；缓存快照能显著减少重复拉取时间。
@@ -696,7 +701,7 @@ pinned key 的语义：
    - 脚本启动会打印：`[na-mr] userscript loaded, version=...`，先确认版本是否是最新。
 
 2. API 401 / 无权限
-   - 确认你已在 New-API 前端登录（浏览器有有效会话）。
+   - 确认已在 New-API 前端登录（浏览器有有效会话）。
    - `localStorage.user` 必须存在且 `user.id` 正常。
 
 3. 搜索结果出现重复渠道
@@ -706,7 +711,7 @@ pinned key 的语义：
 
 ## 维护与扩展（给开发者）
 
-文件：`newapi-model-redirect.user.js` 是一个单文件脚本，包含：
+文件：`userscript/newapi-model-canonicalizer.user.js` 是一个单文件脚本，包含：
 
 - 归一化核心：`normalizeModel()` 与各家族 `normalizeX()`（claude/gemini/gpt/qwen/deepseek/grok/glm/kimi/llama/mistral）
 - 计划生成：`buildPlanForChannel()`（标准集匹配 + 候选选择 + 不变量约束 + diff）
