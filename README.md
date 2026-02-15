@@ -15,5 +15,6 @@
 3. 进入 New-API：`/console/channel`
 4. 右下角「模型重定向」：刷新快照 -> dry-run -> 打开仪表盘 -> 写入
 
-详细说明见：`userscript/README.md`
-
+文档
+- 用户使用指南：`docs/USAGE.zh-CN.md`
+- 规则与实现细节：`userscript/README.md`
