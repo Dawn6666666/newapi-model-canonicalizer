@@ -4,6 +4,96 @@
 
 ---
 
+## Canonicalization（归一化）是什么？这个脚本到底在干嘛？
+
+一句话：**把“同一个模型的不同叫法”折叠成一个统一的标准名（canonical key）**，然后把这个标准名映射到每个渠道真实存在的模型名（actual）。
+
+你在下游只需要记住统一的 canonical key，比如：
+
+- `claude-4.5-sonnet`
+- `gemini-2.5-pro`
+- `gpt-4.1-mini`
+
+脚本会在每个渠道里生成/更新 `model_mapping`，让 New-API 按映射把请求路由到该渠道的真实模型名。
+
+### 归一化的核心规则（只讲用户关心的）
+
+1. **同系列 + 同版本 + 同 tier（+可选 mode/批次）** 才会被折叠到同一个 canonical  
+   目的：既“统一入口”，又尽量不误伤不同用途的模型。
+2. **canonical 只做 key（标准名）**，value 必须是该渠道 `models` 里真实存在的字符串  
+   目的：避免写回一个渠道根本没有的模型名（这会导致无法命中/路由失败）。
+3. **禁止互映/回环**  
+   目的：避免出现 `A->B` 同时 `B->A`，或更长链条循环。
+
+### 例子 1：Claude 的别名折叠（同模型不同叫法）
+
+渠道的 `models` 里可能出现这些写法（语义等价）：
+
+- `anthropic/claude-sonnet-4.5`
+- `claude-sonnet-4-5`
+- `claude-4.5-sonnet`
+
+脚本会统一成 canonical key：
+
+```text
+claude-4.5-sonnet
+```
+
+并写回类似映射（每个渠道可能不同，以该渠道实际 models 为准）：
+
+```json
+{
+  "claude-4.5-sonnet": "anthropic/claude-sonnet-4.5"
+}
+```
+
+### 例子 2：Gemini 的前缀/大小写差异（仍归一到同 canonical）
+
+可能出现：
+
+- `google/gemini-2.5-pro`
+- `Gemini-2.5-Pro`
+
+归一后：
+
+```json
+{
+  "gemini-2.5-pro": "google/gemini-2.5-pro"
+}
+```
+
+### 例子 3：锁批次（pinned）让你精确指定“某个批次/发布日期”
+
+同一模型可能有不同批次（例如末尾 `0528`、`0905`、`2507` 等）。
+
+如果你开启「锁批次」：
+
+- base key：`deepseek-r1`
+- pinned key：`deepseek-r1-0528`
+
+写回可能是：
+
+```json
+{
+  "deepseek-r1": "deepseek-ai/deepseek-r1-0528",
+  "deepseek-r1-0528": "deepseek-ai/deepseek-r1-0528"
+}
+```
+
+为什么要 pinned：同款模型不同批次可能表现不同，你可以显式指定批次，避免“升级后效果变了”。
+
+### 例子 4：什么不会被归一化（避免误伤）
+
+下面这种通常是“专项用途/包装前缀/限额标注/路由标签”，脚本倾向于**不**把它们归到标准模型里：
+
+- `image/xxx`、`embedding/xxx`、`流式抗截断/xxx`
+- `openrouter/free`、`switchpoint/router`（更像路由/标签）
+- `gpt-5-nano [渠道id:33][輸出3k上限]`（明显是特殊用途）
+
+如果你要用这类模型：建议直接用渠道 `models` 中的完整名字调用，不走重定向。
+
+---
+
 ## 0. 你会得到什么
 
 你在 New-API 下游只需要调用一套**标准模型名（canonical key）**，脚本会为每个渠道生成：
@@ -297,4 +387,3 @@ to:  grok-4-heavy
 4. `【图：异常高亮示例（value_not_in_models）】`
 5. `【图：存档点 modal（回滚/删除/导出）】`
 6. `【图：写入此渠道 vs 写入数据库】`
-
