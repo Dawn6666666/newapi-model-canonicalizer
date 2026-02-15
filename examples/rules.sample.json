@@ -1,5 +1,5 @@
 {
-  "note": "规则样例。实际生效逻辑请以 userscript 源码为准。",
+  "note": "规则样例（用于二次开发/审计）。实际生效逻辑请以 userscript/newapi-model-canonicalizer.user.js 为准；本 JSON 当前不会被脚本自动加载。",
   "route_tag_exact_blacklist": [
     "openrouter/free",
     "openrouter/auto",
@@ -8,19 +8,74 @@
     "switchpoint/auto",
     "switchpoint/free"
   ],
+  "pointer_alias_suffixes": [
+    "latest",
+    "default",
+    "stable",
+    "current"
+  ],
   "hard_wrapper_prefixes": [
     "image/",
     "embedding/",
     "rerank/",
     "moderation/",
+    "stream/",
+    "streaming/",
     "假流式/",
+    "伪流式/",
     "流式抗截断/"
   ],
   "mode_wrapper_prefixes": [
     "thinking/",
     "reasoning/",
     "high/",
+    "medium/",
     "low/"
+  ],
+  "mode_tokens": [
+    "thinking",
+    "reasoning",
+    "high",
+    "medium",
+    "low"
+  ],
+  "publisher_dash_prefixes": [
+    "zai-",
+    "groq-",
+    "routeway-",
+    "deepseek-ai-",
+    "openai-",
+    "anthropic-",
+    "google-",
+    "meta-",
+    "x-ai-",
+    "xai-",
+    "openrouter-",
+    "switchpoint-"
+  ],
+  "org_prefixes_allow_drop": [
+    "anthropic",
+    "openai",
+    "google",
+    "x-ai",
+    "xai",
+    "deepseek",
+    "deepseek-ai",
+    "zai",
+    "z-ai",
+    "zhipuai",
+    "groq",
+    "routeway",
+    "moonshotai",
+    "llm-research",
+    "meta-llama",
+    "llama",
+    "qwen",
+    "tngtech",
+    "pro",
+    "org",
+    "openrouter",
+    "switchpoint"
   ],
   "specialized_keywords": [
     "robotics",
@@ -40,22 +95,41 @@
   "annotated_keywords": [
     "渠道",
     "channel",
+    "channelid",
+    "id:",
     "上限",
     "limit",
+    "quota",
     "输出",
     "output",
     "翻译",
     "translate"
   ],
+  "canonical_constraints": {
+    "forbid_slash": true,
+    "regex": "^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+    "recommended_shape": "family-version-tier(-mode)?(-buildTag)?"
+  },
   "canonical_shape": "family-version-tier(-mode)?(-buildTag)?",
   "pinned_key": {
     "enabled": true,
-    "build_tag_source": "trailing numeric token",
+    "build_tag_source": "trailing numeric token or yyyymmdd",
     "example": [
       "deepseek-r1-0528",
       "claude-4.5-sonnet-20250929",
       "kimi-k2-instruct-0905"
     ]
+  },
+  "pinned_policy_by_family": {
+    "claude": { "accept4": false, "accept6": false, "accept8": true },
+    "gemini": { "accept4": false, "accept6": false, "accept8": true },
+    "gpt": { "accept4": false, "accept6": false, "accept8": true, "allow_prefixes": ["gpt-", "o1", "o3", "o4"] },
+    "qwen": { "accept4": true, "accept6": false, "accept8": false },
+    "deepseek": { "accept4": true, "accept6": false, "accept8": false },
+    "grok": { "accept4": true, "accept6": false, "accept8": false },
+    "glm": { "accept4": true, "accept6": false, "accept8": false },
+    "kimi": { "accept4": true, "accept6": false, "accept8": false },
+    "llama": { "accept4": true, "accept6": false, "accept8": false },
+    "mistral": { "accept4": true, "accept6": false, "accept8": false }
   }
 }
-
