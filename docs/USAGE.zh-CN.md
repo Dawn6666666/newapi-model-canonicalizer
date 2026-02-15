@@ -412,3 +412,20 @@ New-API 管理端触发限流。可改为单渠道写入、降低并发写入频
 
 这类模型通常不参与重定向，直接使用完整模型名调用。
 
+---
+
+## 12. 使用案例截图（实际运行）
+
+### 12.1 仪表盘示例
+
+![仪表盘示例 1](images/usage/10-dashboard-example-1.png)
+![仪表盘示例 2](images/usage/11-dashboard-example-2.png)
+![仪表盘示例 3](images/usage/12-dashboard-example-3.png)
+
+### 12.2 渠道编辑页映射示例
+
+![渠道编辑页入口](images/usage/13-channel-edit-open.png)
+![模型重定向示例 1](images/usage/14-channel-mapping-example-1.png)
+![模型重定向示例 2](images/usage/15-channel-mapping-example-2.png)
+![模型重定向示例 3](images/usage/16-channel-mapping-example-3.png)
+
