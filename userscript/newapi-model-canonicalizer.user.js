@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         New-API Model Canonicalizer (Redirect Toolkit)
 // @namespace    https://github.com/Dawn6666666/newapi-model-canonicalizer
-// @version      0.6.15
+// @version      0.6.16
 // @description  Canonicalize model names and rebuild New-API channel model_mapping in-browser (dry-run -> apply), preventing alias cycles.
 // @author       Dawn
 // @homepageURL  https://github.com/Dawn6666666/newapi-model-canonicalizer
@@ -18,7 +18,7 @@
 
   // For debugging: if you still see SyntaxError, you're running an older cached userscript.
   // eslint-disable-next-line no-console
-  const SCRIPT_VERSION = '0.6.15';
+  const SCRIPT_VERSION = '0.6.16';
   console.log('[na-mr] userscript loaded, version=' + SCRIPT_VERSION);
 
   function uniqChannelsById(channels) {
@@ -1701,23 +1701,36 @@
   function summarizePlan(perChannel) {
     const summary = {};
     for (const fam of DEFAULT_FAMILIES) {
-      summary[fam] = { changed_channels: 0, removed: 0, added: 0, warnings: 0 };
+      summary[fam] = { changed_channels: 0, removed: 0, added: 0, changed: 0, warnings: 0 };
     }
     for (const [cid, rec] of Object.entries(perChannel || {})) {
       if (!rec || !rec.ok) continue;
       const d = rec.diff || { added: {}, removed: {}, changed: {} };
-      const changed = Object.keys(d.added || {}).length + Object.keys(d.removed || {}).length + Object.keys(d.changed || {}).length;
-      if (!changed) continue;
-      // We don't attribute per family here (fast MVP). Just count "any change".
-      for (const fam of Object.keys(summary)) {
-        // Best-effort: if any key contains fam token, count it.
-        const keys = Object.keys(d.added || {}).concat(Object.keys(d.removed || {})).concat(Object.keys(d.changed || {}));
-        if (keys.some((k) => String(k).includes(fam))) {
-          summary[fam].changed_channels += 1;
-          summary[fam].removed += Object.keys(d.removed || {}).length;
-          summary[fam].added += Object.keys(d.added || {}).length;
-          break;
-        }
+      const famSeen = new Set();
+      const bump = (fam, field, n) => {
+        if (!fam || !summary[fam]) return;
+        summary[fam][field] += Number(n || 0);
+        famSeen.add(fam);
+      };
+      for (const k of Object.keys(d.added || {})) {
+        const n = normalizeModel(k);
+        bump(n && n.family ? n.family : null, 'added', 1);
+      }
+      for (const k of Object.keys(d.removed || {})) {
+        const n = normalizeModel(k);
+        bump(n && n.family ? n.family : null, 'removed', 1);
+      }
+      for (const k of Object.keys(d.changed || {})) {
+        const n = normalizeModel(k);
+        bump(n && n.family ? n.family : null, 'changed', 1);
+      }
+      const warns = Array.isArray(rec.warnings) ? rec.warnings : [];
+      for (const w of warns) {
+        const nk = normalizeModel(w && w.key ? w.key : '');
+        bump(nk && nk.family ? nk.family : null, 'warnings', 1);
+      }
+      for (const fam of Array.from(famSeen)) {
+        summary[fam].changed_channels += 1;
       }
     }
     return summary;
@@ -1862,14 +1875,32 @@
     }
   }
 
-  async function runDryRun() {
+  function normalizeFamiliesInput(families) {
+    // 统一 families 输入：去重 + 仅保留已知 family，避免 UI/调用方传入脏数据导致“跨家族混入”
+    const out = [];
+    const seen = new Set();
+    for (const f of (families || [])) {
+      const fam = String(f || '').trim().toLowerCase();
+      if (!fam) continue;
+      if (!DEFAULT_FAMILIES.includes(fam)) continue;
+      if (seen.has(fam)) continue;
+      seen.add(fam);
+      out.push(fam);
+    }
+    return out;
+  }
+
+  async function runDryRun(opts) {
     if (!state.snapshot || !state.snapshot.channels) throw new Error('请先加载全量渠道');
     state.running = true;
     state.plan = null;
     state.progress = { pct: 1, text: '启动 dry-run...' };
     render();
     try {
-      const families = Array.from(state.families);
+      // families 默认来自面板里的 Families 多选；但仪表盘也可能传入单 family（例如只跑 gemini）。
+      // 关键：计算阶段必须严格按 families 分桶，否则会出现“点了 gemini 却把 kimi/mistral 也算进来”的现象。
+      const families = normalizeFamiliesInput((opts && Array.isArray(opts.families)) ? opts.families : Array.from(state.families));
+      if (!families.length) throw new Error('families_empty');
       const standardsByFamily = buildStandards(new Set(families), state.snapshot.channels);
       const worker = makeWorker();
       const result = await new Promise((resolve, reject) => {
@@ -2728,6 +2759,16 @@
         return badges.join('');
       }
 
+	      function keyBelongsToFamily(key, fam) {
+	        if (!fam || fam === 'all') return true;
+	        try {
+	          const n = tool.normalizeModel ? tool.normalizeModel(key) : null;
+	          return !!(n && n.family === fam);
+	        } catch {
+	          return false;
+	        }
+	      }
+
 	      function filterChannels() {
 	        const list0 = (st.snapshot && st.snapshot.channels) ? st.snapshot.channels : [];
 	        // 兜底：按 id 去重，避免出现两个完全相同的渠道项
@@ -2752,16 +2793,16 @@
           const rec = getPlanRec(ch.id);
           if (onlyChanged) {
             if (!rec || !rec.ok || !countDiff(rec.diff)) continue;
-          }
-          if (fam !== 'all') {
-            const mm = (rec && rec.ok && st.viewMode !== 'db') ? (rec.after||{}) : (ch.model_mapping||{});
-            const keys = Object.keys(mm || {});
-            if (!keys.some((k)=> String(k).includes(fam))) continue;
-          }
-          out.push(ch);
-        }
-        return out;
-      }
+	          }
+	          if (fam !== 'all') {
+	            const mm = (rec && rec.ok && st.viewMode !== 'db') ? (rec.after||{}) : (ch.model_mapping||{});
+	            const keys = Object.keys(mm || {});
+	            if (!keys.some((k)=> keyBelongsToFamily(k, fam))) continue;
+	          }
+	          out.push(ch);
+	        }
+	        return out;
+	      }
 
       function renderFamilyTabs() {
         const box = el('familyTabs');
@@ -2839,10 +2880,10 @@
         return out;
       }
 
-      function renderTable() {
-        const { ch, rec, db, plan, diff } = currentMaps();
-        el('midTitle').textContent = ch ? ('#' + ch.id + ' ' + (ch.name||'')) : '映射预览';
-        el('midMeta').textContent = ch ? ('models ' + (ch.models?ch.models.length:0) + (ch.group?(' | ' + ch.group):'')) : '';
+	      function renderTable() {
+	        const { ch, rec, db, plan, diff } = currentMaps();
+	        el('midTitle').textContent = ch ? ('#' + ch.id + ' ' + (ch.name||'')) : '映射预览';
+	        el('midMeta').textContent = ch ? ('models ' + (ch.models?ch.models.length:0) + (ch.group?(' | ' + ch.group):'')) : '';
         // 右侧 meta：把 “翻译 | enabled” 这种调试串换成更直观的标签
         if (ch) {
           const enabled = Number(ch.status) === 1;
@@ -2911,12 +2952,13 @@
         head.innerHTML = '';
         body.innerHTML = '';
 
-        const kvQ = (st.kvSearch || '').trim().toLowerCase();
-        const onlyAnom = !!st.onlyAnom;
+	        const kvQ = (st.kvSearch || '').trim().toLowerCase();
+	        const onlyAnom = !!st.onlyAnom;
+	        const fam = st.selectedFamily;
 
-        if (st.viewMode === 'diff') {
-          head.innerHTML = '<th class="op">op</th><th style="width:34%;">key</th><th style="width:33%;">from</th><th>to</th>';
-          const rows = flattenDiff(diff);
+	        if (st.viewMode === 'diff') {
+	          head.innerHTML = '<th class="op">op</th><th style="width:34%;">key</th><th style="width:33%;">from</th><th>to</th>';
+	          const rows = flattenDiff(diff);
           const reasonMap = (rec && rec.ok && rec.reasons) ? rec.reasons : {};
           const reasonBadgesHTML = (key) => {
             const r = reasonMap && reasonMap[String(key)];
@@ -2931,11 +2973,12 @@
             }
             return tags.length ? ('<span class="rtags">' + tags.join('') + '</span>') : '';
           };
-          let shown = 0;
-          for (const e of rows) {
-            if (kvQ) {
-              const hay = (String(e.key) + ' ' + String(e.from ?? '') + ' ' + String(e.to ?? '')).toLowerCase();
-              if (!hay.includes(kvQ)) continue;
+	          let shown = 0;
+	          for (const e of rows) {
+	            if (fam !== 'all' && !keyBelongsToFamily(e.key, fam)) continue;
+	            if (kvQ) {
+	              const hay = (String(e.key) + ' ' + String(e.from ?? '') + ' ' + String(e.to ?? '')).toLowerCase();
+	              if (!hay.includes(kvQ)) continue;
             }
             const checkV = (e.op === '-') ? e.from : e.to;
             const an = (checkV != null) ? (!modelsSet.has(String(checkV))) : false;
@@ -2953,15 +2996,16 @@
             if (shown >= 2000) break;
           }
           el('kvStats').textContent = 'diff 条目: ' + shown + (shown>=2000?' (已截断)':'');
-        } else {
-          head.innerHTML = '<th style="width:50%;">key</th><th>value</th>';
-          const m = (st.viewMode === 'db') ? db : plan;
-          const keys = Object.keys(m||{}).sort();
-          let shown = 0;
-          for (const k of keys) {
-            const v = String(m[k]);
-            if (kvQ) {
-              const hay = (String(k) + ' ' + v).toLowerCase();
+	        } else {
+	          head.innerHTML = '<th style="width:50%;">key</th><th>value</th>';
+	          const m = (st.viewMode === 'db') ? db : plan;
+	          const keys = Object.keys(m||{}).sort();
+	          let shown = 0;
+	          for (const k of keys) {
+	            if (fam !== 'all' && !keyBelongsToFamily(k, fam)) continue;
+	            const v = String(m[k]);
+	            if (kvQ) {
+	              const hay = (String(k) + ' ' + v).toLowerCase();
               if (!hay.includes(kvQ)) continue;
             }
             const an = !modelsSet.has(String(v));
@@ -3047,14 +3091,16 @@
         }
       });
 
-      el('btnDryRun').addEventListener('click', async () => {
-        try {
-          setButtonsDisabled(true);
-          setProgress(1, '运行 dry-run...');
-          await tool.runDryRun((p)=> setProgress(p.pct, p.text));
-          await refreshFromTool();
-          setProgress(100, 'dry-run 完成');
-          st.page = 0;
+	      el('btnDryRun').addEventListener('click', async () => {
+	        try {
+	          setButtonsDisabled(true);
+	          setProgress(1, '运行 dry-run...');
+	          const fam = st.selectedFamily;
+	          const opts = (fam && fam !== 'all') ? { families: [fam] } : null;
+	          await tool.runDryRun((p)=> setProgress(p.pct, p.text), opts || undefined);
+	          await refreshFromTool();
+	          setProgress(100, 'dry-run 完成');
+	          st.page = 0;
           st.selectedChannelId = null;
           renderAll();
         } catch (e) {
@@ -3594,7 +3640,7 @@
       parts.push('尚未加载全量渠道快照');
     }
     if (plan && plan.summary) {
-      const fams = Array.from(state.families).join(', ');
+      const fams = Array.isArray(plan.families) ? plan.families.join(', ') : Array.from(state.families).join(', ');
       const pv = plan.script_version ? String(plan.script_version) : 'unknown';
       const snapTs = plan.snapshot_ts ? Number(plan.snapshot_ts) : null;
       const stale = (pv !== SCRIPT_VERSION) || (snap && snap.ts && snapTs && snap.ts !== snapTs);
@@ -3660,14 +3706,17 @@
     injectUI();
     applyThemeToLocalUI();
     // Expose minimal API for the dashboard window (about:blank uses opener reference).
-	    window[TOOL_ID] = {
-	      SCRIPT_VERSION,
-	      DEFAULT_FAMILIES,
-	      DEFAULT_STANDARDS,
-	      getState: async () => ({ lastApply: state.lastApply }),
-	      getSnapshot: async () => state.snapshot,
-	      getPlan: async () => state.plan,
-	      refreshSnapshot: async (force) => loadSnapshot(!!force),
+		    window[TOOL_ID] = {
+		      SCRIPT_VERSION,
+		      DEFAULT_FAMILIES,
+		      DEFAULT_STANDARDS,
+		      // 供仪表盘/外部 UI 做“严格按家族”过滤，不再使用 includes 这类弱匹配。
+		      normalizeModel,
+		      detectFamily,
+		      getState: async () => ({ lastApply: state.lastApply }),
+		      getSnapshot: async () => state.snapshot,
+		      getPlan: async () => state.plan,
+		      refreshSnapshot: async (force) => loadSnapshot(!!force),
       getSettings: async () => ({ pinnedKeys: !!state.pinnedKeys, theme: state.theme }),
       setPinnedKeys: async (v) => {
         state.pinnedKeys = !!v;
@@ -3680,27 +3729,27 @@
         applyThemeToLocalUI();
         render();
       },
-      runDryRun: async (onProgress) => {
-        if (typeof onProgress === 'function') onProgress({ pct: 1, text: '启动 dry-run...' });
-        // Forward progress updates by temporarily wrapping renderProgress.
-        if (typeof onProgress === 'function') {
-          const old = renderProgress;
-          // eslint-disable-next-line no-func-assign
-          renderProgress = () => {
-            old();
-            onProgress({ pct: state.progress.pct || 0, text: state.progress.text || '' });
-          };
-          try {
-            await runDryRun();
-          } finally {
-            // eslint-disable-next-line no-func-assign
-            renderProgress = old;
-          }
-        } else {
-          await runDryRun();
-        }
-        if (typeof onProgress === 'function') onProgress({ pct: 100, text: 'dry-run 完成' });
-      },
+	      runDryRun: async (onProgress, opts) => {
+	        if (typeof onProgress === 'function') onProgress({ pct: 1, text: '启动 dry-run...' });
+	        // Forward progress updates by temporarily wrapping renderProgress.
+	        if (typeof onProgress === 'function') {
+	          const old = renderProgress;
+	          // eslint-disable-next-line no-func-assign
+	          renderProgress = () => {
+	            old();
+	            onProgress({ pct: state.progress.pct || 0, text: state.progress.text || '' });
+	          };
+	          try {
+	            await runDryRun(opts);
+	          } finally {
+	            // eslint-disable-next-line no-func-assign
+	            renderProgress = old;
+	          }
+	        } else {
+	          await runDryRun(opts);
+	        }
+	        if (typeof onProgress === 'function') onProgress({ pct: 100, text: 'dry-run 完成' });
+	      },
 	      applyPlan: async (onProgress, opts) => {
 	        if (typeof onProgress === 'function') onProgress({ pct: 1, text: '写入中...' });
 	        await applyPlanWithOpts(opts);
