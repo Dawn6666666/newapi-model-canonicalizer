@@ -125,7 +125,29 @@
 
 本脚本 **不会修改 `models` 列表本身**。脚本的输出是写回 `model_mapping`（canonical key -> actual）。
 
-因此，你会遇到两类“看起来没被归一化”的情况，但它们并不是 bug：
+因此，你会遇到“看起来没被归一化 / 没出现在 Diff 里”的情况，但它们通常不是 bug。
+
+先给一个最重要的心智模型（建议记住这句）：
+
+> `models` 是上游“真实可用名字”的集合；`model_mapping` 只负责把“你想统一调用的 canonical key”映射到其中某一个真实名字。  
+> 所以：**不是每一个 models 条目都需要（或应该）出现在映射里**。
+
+### 如何判断“某个模型为什么没出现在 Diff/Plan 里”
+
+你可以按下面这个顺序快速定位原因（从最常见到最少见）：
+
+1. **它是 canonical key 本体，且在该渠道 models 里已存在同名**
+   - 结果：无需映射，不会新增条目
+2. **它是专项/包装/用途标注/路由标签**
+   - 结果：按设计排除，不参与通用重定向
+3. **它能被归一化，但不在标准集合（standard set）里**
+   - 结果：脚本不会为它生成 key（因为你没有把它当作“下游统一入口”）
+   - 解决：把它加入 `DEFAULT_STANDARDS.<family>` 或依赖 auto-extend（见后文“标准集合”）
+4. **它归一化失败（family/version/tier 解析不出）**
+   - 结果：normalize 返回 null，条目被丢弃（避免污染标准集合与 key）
+   - 解决：需要补规则（但你当前说“不用再改”，这里仅说明机制）
+
+下面用你这条渠道提供的 models 片段做更具体的解释与例子。
 
 ### A) 无需映射（渠道本身已包含同名 canonical）
 
@@ -142,6 +164,15 @@
 - Gemini：`gemini-3-pro-preview`
 
 它们不出现在 Diff/Plan 里，只代表“这个渠道已经能直接用 canonical 调用”，无需通过 `model_mapping` 再绕一层。
+
+再强调一次：这不是“没归一化”，而是“归一化后发现已经同名可用，所以不需要写映射”。
+
+如果你希望“即便同名也写一条显式映射（key==value）”，那属于另一种产品取舍：
+
+- 好处：所有渠道的 `model_mapping` 看起来更一致
+- 坏处：DB 会被大量无意义条目填满，后期维护成本会更高
+
+本脚本选择的是“少写、只写必要的”。
 
 ### B) 按设计不参与通用重定向（避免误伤）
 
@@ -160,6 +191,15 @@
 
 这类模型如果要用：建议你直接在下游请求里填写它在 `models` 中的完整名字，不走重定向。
 
+结合你的列表，下面这些就属于“你能看到，但脚本不会把它当作通用重定向目标”的典型：
+
+- `z-ai/glm-4.5-air:free`
+  - `:free` 是渠道常见噪声 token，canonical 不会包含它；但它也更像“特殊入口/策略”，不建议让通用 key 映射到它。
+- `deepseek/deepseek-r1-0528:free`
+  - 同上（free 噪声），而且 `deepseek-r1-0528` 本身已经是 pinned 语义，通常更适合被当作“精确批次 key”，而不是被其它 key 间接指向。
+- `grok-imagine-1.0-video`
+  - 这是一个更偏“生成式多模态入口”的名字；如果你要用它，建议直接调用完整名（是否参与通用重定向取决于你的策略开关与规则）。
+
 ### C) “需要映射”的典型例子（你列表里就有）
 
 当渠道里 **没有** 你想要的 canonical key，但存在同义变体时，脚本会生成映射：
@@ -171,6 +211,37 @@
   - `glm-4.7` -> `cerebras/zai-glm-4.7`（或 `zai-glm-4.7` / `z-ai/glm-4.7`，取决于该渠道实际 models）
 - DeepSeek（大小写/前缀变体）
   - `deepseek-v3.1` -> `deepseek-ai/deepseek-v3.1`（或 `DeepSeek-V3.1`）
+
+你可以把这类映射理解为：
+
+- key：为了让下游“统一入口”去调用（canonical）
+- value：在该渠道里“真实存在且能用”的名字（actual）
+
+示例（概念示意，实际 value 以该渠道 models 为准）：
+
+```json
+{
+  "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
+  "deepseek-v3.1": "deepseek-ai/deepseek-v3.1",
+  "glm-4.7": "cerebras/zai-glm-4.7"
+}
+```
+
+### D) 为什么你会在同一个渠道看到“跨家族的映射一起出现”
+
+如果你运行的是 `all`（全量 families）dry-run，这个渠道的 `models` 同时包含：
+
+- claude / gemini / gpt / qwen / deepseek / grok / glm / kimi / mistral ...
+
+脚本就会为这些家族分别生成“该家族的 canonical -> 该渠道的 actual”。因此在 Diff/Plan 里你会看到：
+
+- 既有 Claude（如 `claude-3.5-sonnet`）
+- 也有 DeepSeek（如 `deepseek-v3.1`）
+- 也有 GLM/Qwen/GPT...
+
+如果你只想审阅某一个家族：
+
+- 在仪表盘顶部 tab 选中该家族（如 `qwen`），再点击 `运行 dry-run`（从 `v0.6.16` 起，仪表盘会只计算该 tab 对应的 family）。
 
 ---
 
